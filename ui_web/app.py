@@ -14,15 +14,16 @@ from meme_bot.runner import BotRunner
 from meme_bot.utils import FileLock
 from ui_web.log_tail import follow_file, tail_lines, touch_file
 
-CFG_PATH = Path("config.yaml")
+CFG_PATH = (Path(__file__).resolve().parent.parent / "config.yaml").resolve()
 runner = BotRunner(str(CFG_PATH))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     cfg = Config.load(CFG_PATH)
-    touch_file(cfg.get("logging", "events_path", default="events.log"))
-    touch_file(cfg.get("logging", "trades_path", default="trades.jsonl"))
+    events_path, trades_path = _resolved_log_paths(cfg)
+    touch_file(events_path)
+    touch_file(trades_path)
     if bool(cfg.get("auto_start_bot", default=True)):
         runner.start()
     yield
@@ -44,6 +45,11 @@ class ConfigPayload(BaseModel):
 def _cfg() -> Config:
     return Config.load(CFG_PATH)
 
+
+def _resolved_log_paths(cfg: Config) -> tuple[str, str]:
+    events_path = cfg.resolve_path("logging", "events_path", default="events.log")
+    trades_path = cfg.resolve_path("logging", "trades_path", default="trades.jsonl")
+    return events_path, trades_path
 
 
 def _write_config(raw: dict[str, Any]) -> None:
@@ -98,8 +104,9 @@ def get_config() -> dict[str, Any]:
 def update_config(payload: ConfigPayload) -> dict[str, Any]:
     _write_config(payload.config)
     cfg = _cfg()
-    touch_file(cfg.get("logging", "events_path", default="events.log"))
-    touch_file(cfg.get("logging", "trades_path", default="trades.jsonl"))
+    events_path, trades_path = _resolved_log_paths(cfg)
+    touch_file(events_path)
+    touch_file(trades_path)
     runner.restart()
     return {"ok": True, "restarted": True}
 
@@ -107,13 +114,15 @@ def update_config(payload: ConfigPayload) -> dict[str, Any]:
 @app.get("/api/logs/events")
 def get_events_logs(tail: int = 200) -> list[dict[str, Any]]:
     cfg = _cfg()
-    return tail_lines(cfg.get("logging", "events_path", default="events.log"), tail)
+    events_path, _ = _resolved_log_paths(cfg)
+    return tail_lines(events_path, tail)
 
 
 @app.get("/api/logs/trades")
 def get_trades_logs(tail: int = 200) -> list[dict[str, Any]]:
     cfg = _cfg()
-    return tail_lines(cfg.get("logging", "trades_path", default="trades.jsonl"), tail)
+    _, trades_path = _resolved_log_paths(cfg)
+    return tail_lines(trades_path, tail)
 
 
 @app.websocket("/ws/events")
@@ -121,7 +130,8 @@ async def ws_events(websocket: WebSocket) -> None:
     await websocket.accept()
     try:
         cfg = _cfg()
-        await follow_file(cfg.get("logging", "events_path", default="events.log"), websocket)
+        events_path, _ = _resolved_log_paths(cfg)
+        await follow_file(events_path, websocket)
     except WebSocketDisconnect:
         return
 
@@ -131,7 +141,8 @@ async def ws_trades(websocket: WebSocket) -> None:
     await websocket.accept()
     try:
         cfg = _cfg()
-        await follow_file(cfg.get("logging", "trades_path", default="trades.jsonl"), websocket)
+        _, trades_path = _resolved_log_paths(cfg)
+        await follow_file(trades_path, websocket)
     except WebSocketDisconnect:
         return
 

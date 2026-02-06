@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from threading import Event
@@ -18,11 +19,15 @@ from meme_bot.strategy import MomentumScalpStrategy
 
 def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
     last_mode: str | None = None
+    loop_count = 0
 
     while not stop_event.is_set():
         cfg = Config.load(cfg_path)
-        logger = JsonLineLogger(cfg.get("logging", "events_path"), cfg.get("logging", "trades_path"))
-        store = RuntimeStateStore(cfg.get("state_store", "runtime_state_path"))
+        logger = JsonLineLogger(
+            cfg.resolve_path("logging", "events_path", default="events.log"),
+            cfg.resolve_path("logging", "trades_path", default="trades.jsonl"),
+        )
+        store = RuntimeStateStore(cfg.resolve_path("state_store", "runtime_state_path", default="runtime_state.json"))
 
         indexer = IndexerProvider(cfg.get("providers", "indexer"))
         quote = QuoteProvider(cfg.get("providers", "quote"))
@@ -40,8 +45,12 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
 
         now = datetime.utcnow()
         machine = StateMachine(state)
+        loop_count += 1
 
         try:
+            tick_every = max(1, int(cfg.get("logging", "tick_every_loops", default=1)))
+            if loop_count % tick_every == 0:
+                logger.event("tick", {"mode": state.mode, "loop": loop_count})
             if state.mode == BotMode.SAFE:
                 logger.event("safe_mode", {"reason": state.safe_reason})
                 store.save(state)
@@ -147,7 +156,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
             stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
 
         except Exception as exc:  # noqa: BLE001
-            logger.event("loop_error", {"error": str(exc)})
+            logger.event("loop_error", {"error": str(exc), "traceback": traceback.format_exc(), "loop": loop_count})
             store.save(state)
             stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
 

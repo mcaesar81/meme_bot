@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timedelta
 from threading import Event, Thread
 from typing import Any
@@ -44,7 +43,7 @@ class BotRunner:
 
     def _load_state_ctx(self) -> tuple[Config, RuntimeStateStore, Any, StateMachine]:
         cfg = Config.load(self.cfg_path)
-        store = RuntimeStateStore(cfg.get("state_store", "runtime_state_path"))
+        store = RuntimeStateStore(cfg.resolve_path("state_store", "runtime_state_path", default="runtime_state.json"))
         state = store.load()
         machine = StateMachine(state)
         return cfg, store, state, machine
@@ -70,7 +69,7 @@ class BotRunner:
 
     def status(self) -> dict[str, Any]:
         cfg = Config.load(self.cfg_path)
-        store = RuntimeStateStore(cfg.get("state_store", "runtime_state_path"))
+        store = RuntimeStateStore(cfg.resolve_path("state_store", "runtime_state_path", default="runtime_state.json"))
         state = store.load()
         return {
             "runner_started": self._thread is not None,
