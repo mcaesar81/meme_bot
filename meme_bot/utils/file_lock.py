@@ -14,6 +14,7 @@ class FileLock:
         self.timeout_sec = timeout_sec
         self.poll_sec = poll_sec
         self._fh = None
+        self._locked = False
 
     def __enter__(self) -> "FileLock":
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -23,6 +24,7 @@ class FileLock:
         while True:
             try:
                 self._acquire()
+                self._locked = True
                 self._write_lock_metadata()
                 return self
             except OSError:
@@ -56,15 +58,27 @@ class FileLock:
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def _release(self) -> None:
-        if os.name == "nt":
-            import msvcrt
+        if not self._locked or self._fh is None:
+            return
 
-            self._fh.seek(0)
-            msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
+        try:
+            if os.name == "nt":
+                import msvcrt
 
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        except PermissionError:
+            if os.name != "nt":
+                raise
+        except OSError:
+            if os.name != "nt":
+                raise
+        finally:
+            self._locked = False
 
     def _write_lock_metadata(self) -> None:
         now_iso = datetime.now(timezone.utc).isoformat()

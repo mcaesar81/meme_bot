@@ -206,6 +206,7 @@ def dashboard() -> str:
       <label>strategy.max_position_usd</label><input id=\"cfg_maxpos\" type=\"number\" step=\"0.1\" />
       <label>providers.indexer.top_n</label><input id=\"cfg_topn\" type=\"number\" />
       <label>exclude_symbols (comma separated)</label><input id=\"cfg_excludes\" />
+      <label>exclude_token_addresses (comma separated)</label><input id=\"cfg_exclude_addresses\" />
       <button onclick=\"saveConfig()\">Save Config + Restart Bot</button>
       <details><summary>Raw config JSON</summary><textarea id=\"cfg_raw\" rows=\"10\"></textarea></details>
     </div>
@@ -238,8 +239,33 @@ function tradeClass(item) {
   const side = String(item.side || '').toLowerCase();
   return side === 'buy' ? 'trade-buy' : (side === 'sell' ? 'trade-sell' : '');
 }
+function prettyToken(item) {
+  const md = item.metadata || item.payload || {};
+  const sym = md.token_symbol || item.symbol || item.candidate_symbol || 'UNKNOWN';
+  const name = md.token_name || item.token_name || '';
+  const addr = md.token_address || item.token_address || item.candidate_token_address || '';
+  return `${sym}${name ? ` (${name})` : ''}${addr ? ` @ ${addr}` : ''}`;
+}
 function logText(item) {
-  return JSON.stringify(item);
+  if (item.event_type) {
+    const p = item.payload || {};
+    const token = prettyToken(item);
+    if (item.event_type === 'no_entry') {
+      return `[${item.event_type}] ${token} reason=${p.reason} liq=${p.candidate_liquidity_usd ?? '-'} vol5m=${p.candidate_vol_5m_usd ?? '-'} dex=${p.dex_id ?? '-'} pair=${p.pair_address ?? '-'}`;
+    }
+    if (item.event_type === 'decision_summary') {
+      return `[decision] candidates=${p.candidates} passed=${p.passed_filters} blocked_by=${p.blocked_by ?? 'none'} best=${p.best ?? '-'}`;
+    }
+    if (item.event_type === 'position_closed') {
+      return `[position_closed] ${token} pnl=${p.pnl_usd ?? '-'} dex=${p.dex_id ?? '-'} pair=${p.pair_address ?? '-'}`;
+    }
+    return `[${item.event_type}] ${token} ${JSON.stringify(p)}`;
+  }
+
+  const md = item.metadata || {};
+  const token = prettyToken(item);
+  const pnl = md.pnl_usd ?? item.pnl_usd;
+  return `[trade ${item.side || '-'}] ${token} filled=${item.filled_usd ?? '-'} price=${item.avg_price_usd ?? '-'} pnl=${pnl ?? '-'} dex=${md.dex_id ?? '-'} chain=${md.chain_id ?? '-'} pair=${md.pair_address ?? '-'}`;
 }
 
 async function refreshStatus() {
@@ -247,7 +273,7 @@ async function refreshStatus() {
   statusData = await r.json();
   const mode = document.getElementById('mode');
   mode.className = 'status ' + statusData.mode;
-  mode.textContent = `Mode: ${statusData.mode}`;
+  mode.textContent = `Mode: ${statusData.mode} | Daily PnL: ${statusData.daily_pnl_usd ?? 0}`;
   document.getElementById('runner').textContent = `Runner alive: ${statusData.runner_alive}`;
   document.getElementById('statusJson').textContent = JSON.stringify(statusData, null, 2);
 }
@@ -280,6 +306,7 @@ async function loadConfig() {
   setInput('cfg_maxpos', configData.strategy?.max_position_usd);
   setInput('cfg_topn', configData.providers?.indexer?.top_n);
   setInput('cfg_excludes', (configData.risk?.exclude_symbols || []).join(', '));
+  setInput('cfg_exclude_addresses', (configData.risk?.exclude_token_addresses || []).join(', '));
   document.getElementById('cfg_raw').value = JSON.stringify(configData, null, 2);
 }
 
@@ -297,6 +324,8 @@ function buildConfigFromEditor() {
   cfg.strategy.max_position_usd = Number(document.getElementById('cfg_maxpos').value || 5);
   cfg.providers.indexer.top_n = Number(document.getElementById('cfg_topn').value || 25);
   cfg.risk.exclude_symbols = document.getElementById('cfg_excludes').value
+    .split(',').map(s => s.trim()).filter(Boolean);
+  cfg.risk.exclude_token_addresses = document.getElementById('cfg_exclude_addresses').value
     .split(',').map(s => s.trim()).filter(Boolean);
 
   const rawText = document.getElementById('cfg_raw').value.trim();
