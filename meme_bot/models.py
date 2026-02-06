@@ -15,7 +15,11 @@ class BotMode(str, Enum):
 @dataclass
 class CandidateToken:
     symbol: str
+    name: str
     address: str
+    pair_address: str
+    dex_id: str
+    chain_id: str
     price_usd: float
     liquidity_usd: float
     volume_5m_usd: float
@@ -30,6 +34,10 @@ class Position:
     size_usd: float
     entry_price_usd: float
     opened_at: datetime
+    token_name: str = ""
+    pair_address: str = ""
+    dex_id: str = ""
+    chain_id: str = ""
     highest_unrealized_usd: float = 0.0
     quick_profit_taken: bool = False
     last_scale_in_at: Optional[datetime] = None
