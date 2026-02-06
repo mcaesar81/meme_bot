@@ -10,6 +10,9 @@ class RiskManager:
         self.cfg = cfg
 
     def filter_candidates(self, candidates: list[CandidateToken]) -> list[CandidateToken]:
+        exclude = set(s.upper() for s in self.cfg.get("exclude_symbols", []))
+        candidates = [c for c in candidates if c.symbol.upper() not in exclude]
+        
         min_liq = float(self.cfg["min_liquidity_usd"])
         min_vol = float(self.cfg["min_volume_5m_usd"])
         return [c for c in candidates if c.liquidity_usd >= min_liq and c.volume_5m_usd >= min_vol]

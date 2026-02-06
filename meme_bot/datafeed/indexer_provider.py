@@ -12,6 +12,7 @@ class IndexerProvider:
     """HTTP stub for indexer/universe source."""
 
     def __init__(self, cfg: dict[str, Any]):
+        self.cfg = cfg 
         self.base_url = cfg["base_url"].rstrip("/")
         self.universe_path = cfg["universe_path"]
         self.top_n = int(cfg.get("top_n", 20))
@@ -20,28 +21,25 @@ class IndexerProvider:
 
     def fetch_universe(self) -> list[CandidateToken]:
         url = f"{self.base_url}{self.universe_path}"
-        params = {"top_n": self.top_n, "window": "5m"}
+        q = self.cfg.get("search_q", "solana")
+        data = self._get_json(url, params={"q": q})
 
-        data = self._get_json(url, params=params)
-        # TODO(user): map provider-specific fields to normalized CandidateToken fields.
-        # Expected provider payload example (placeholder):
-        # {"tokens": [{"symbol": "MEME", "address": "...", "price": 0.01,
-        #               "liquidity_usd": 12345, "volume_5m_usd": 7000,
-        #               "momentum": 0.42, "updated_at": "2026-01-01T00:00:00Z"}]}
         tokens = []
-        for item in data.get("tokens", []):
+        for p in data.get("pairs", [])[: self.top_n]:
+            base = (p.get("baseToken") or {})
             tokens.append(
                 CandidateToken(
-                    symbol=item.get("symbol", "UNKNOWN"),
-                    address=item.get("address", ""),
-                    price_usd=float(item.get("price", 0.0)),
-                    liquidity_usd=float(item.get("liquidity_usd", 0.0)),
-                    volume_5m_usd=float(item.get("volume_5m_usd", 0.0)),
-                    momentum_score=float(item.get("momentum", 0.0)),
+                    symbol=base.get("symbol", "UNKNOWN"),
+                    address=base.get("address", ""),
+                    price_usd=float(p.get("priceUsd") or 0.0),
+                    liquidity_usd=float((p.get("liquidity") or {}).get("usd") or 0.0),
+                    volume_5m_usd=float((p.get("volume") or {}).get("h24") or 0.0),  # placeholder
+                    momentum_score=float((p.get("priceChange") or {}).get("m5") or 0.0),
                     last_update_ts=datetime.utcnow(),
                 )
             )
         return tokens
+
 
     def _get_json(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         try:

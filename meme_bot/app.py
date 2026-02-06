@@ -96,7 +96,11 @@ def run() -> None:
                         else:
                             logger.event("entry_rejected", {"reason": "slippage_limit", "symbol": pick.symbol})
             else:
-                pos = Position(**state.active_position)
+                raw = dict(state.active_position or {})
+                for k in ("opened_at", "last_scale_in_at"):
+                    if isinstance(raw.get(k), str):
+                        raw[k] = datetime.fromisoformat(raw[k])
+                pos = Position(**raw)
                 px = quote.get_effective_price(pos.token_address, "sell", pos.size_usd)
                 unrealized = (px - pos.entry_price_usd) * (pos.size_usd / max(pos.entry_price_usd, 1e-9))
 

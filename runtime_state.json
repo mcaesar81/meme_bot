@@ -1,0 +1,12 @@
+{
+  "mode": "RUN",
+  "pause_until_iso": null,
+  "pause_reason": null,
+  "daily_pnl_usd": 0.0,
+  "hourly_pnl_usd": 0.0,
+  "trades_today": 1,
+  "last_trade_ts_iso": "2026-02-05T22:58:39.793618",
+  "active_position": null,
+  "last_price_ts_iso": "2026-02-05T23:26:11.689829",
+  "safe_reason": null
+}

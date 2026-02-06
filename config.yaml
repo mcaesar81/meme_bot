@@ -3,12 +3,20 @@ loop_interval_sec: 3
 state_stale_price_sec: 20
 trade_wallet_overfund_pause_usd: 150
 
+
+
 risk:
+  exclude_symbols:
+  - SOL
+  - ETH
+  - BTC
+  - USDC
+  - USDT
   max_trades_per_day: 20
   max_loss_per_day_usd: 30
   max_loss_per_hour_usd: 10
   max_position_usd: 5
-  slippage_limit_bps: 250
+  slippage_limit_bps: 1500
   min_liquidity_usd: 10000
   min_volume_5m_usd: 5000
   trade_cooldown_sec: 20
@@ -33,16 +41,19 @@ wallets:
 
 providers:
   indexer:
-    base_url: "https://REPLACE_INDEXER_ENDPOINT"
-    universe_path: "/tokens/top"
+    base_url: "https://api.dexscreener.com"
+    universe_path: "/latest/dex/search"
     top_n: 25
     timeout_sec: 10
     api_key: ""
+    search_q: "solana"   # <-- add this
+
   quote:
-    base_url: "https://REPLACE_QUOTE_ENDPOINT"
-    quote_path: "/quote"
+    base_url: "https://api.dexscreener.com"
+    quote_path: "/token-pairs/v1/solana"   # <-- we will append /{token} in code
     timeout_sec: 10
     api_key: ""
+
 
 logging:
   events_path: "events.log"

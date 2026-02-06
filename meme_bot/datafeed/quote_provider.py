@@ -15,13 +15,17 @@ class QuoteProvider:
         self.api_key = cfg.get("api_key", "")
 
     def get_effective_price(self, token_address: str, side: str, size_usd: float) -> float:
-        url = f"{self.base_url}{self.quote_path}"
-        params = {"token": token_address, "side": side, "size_usd": size_usd}
-        data = self._get_json(url, params=params)
+        url = f"{self.base_url}{self.quote_path}/{token_address}"
+        data = self._get_json(url, params={})
 
-        # TODO(user): adjust parse according to your quote API response.
-        # Expected placeholder shape: {"effective_price_usd": 0.0123}
-        return float(data.get("effective_price_usd", 0.0))
+        # token-pairs returns a list; pick the highest liquidity pair
+        pairs = data if isinstance(data, list) else data.get("pairs", [])
+        if not pairs:
+            return 0.0
+
+        best = sorted(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0.0), reverse=True)[0]
+        return float(best.get("priceUsd") or 0.0)
+
 
     def _get_json(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         try:
