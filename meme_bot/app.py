@@ -79,6 +79,17 @@ def _apply_realized_pnl(state: RuntimeState, pnl_usd: float, now: datetime, logg
     )
 
 
+def _record_trade_attempt(
+    state: RuntimeState,
+    token_last_trade_iso: dict[str, str],
+    token_address: str,
+    now: datetime,
+) -> None:
+    state.trades_today += 1
+    state.last_trade_ts_iso = iso_utc(now)
+    token_last_trade_iso[token_address] = iso_utc(now)
+
+
 def _load_position(raw: dict) -> Position:
     parsed = dict(raw)
     for key in ("opened_at", "last_scale_in_at"):
@@ -209,6 +220,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                         best_reason = "price_unavailable"
                     elif risk.slippage_ok(reference_price, best.price_usd):
                         result = executor.execute(best.symbol, best.address, "buy", size, reference_price)
+                        _record_trade_attempt(state, token_last_trade_iso, best.address, now)
                         result.metadata.update(_token_meta(best))
                         result.metadata["reference_price_usd"] = best.price_usd
                         state.active_position = asdict(
@@ -225,9 +237,6 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                 last_scale_in_at=now,
                             )
                         )
-                        state.trades_today += 1
-                        state.last_trade_ts_iso = iso_utc(now)
-                        token_last_trade_iso[best.address] = iso_utc(now)
                         logger.trade(result)
                     else:
                         best_reason = "slippage_too_high"
@@ -266,6 +275,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 partial = strategy.quick_profit_partial_size(pos, unrealized)
                 if partial > 0:
                     result = executor.execute(pos.symbol, pos.token_address, "sell", partial, px)
+                    _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
                     leg_qty = partial / max(pos.entry_price_usd, 1e-9)
                     leg_exit_value = leg_qty * px
                     leg_pnl = leg_exit_value - partial
@@ -298,6 +308,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     buy_px = quote.get_effective_price(pos.token_address, "buy", scale)
                     if risk.slippage_ok(buy_px, px):
                         result = executor.execute(pos.symbol, pos.token_address, "buy", scale, buy_px)
+                        _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
                         result.metadata.update(
                             {
                                 "token_address": pos.token_address,
@@ -316,6 +327,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 exit_now, reason = strategy.should_exit(pos, now, unrealized)
                 if exit_now or pos.size_usd <= 0:
                     result = executor.execute(pos.symbol, pos.token_address, "sell", pos.size_usd, px)
+                    _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
                     qty = pos.size_usd / max(pos.entry_price_usd, 1e-9)
                     exit_value = qty * px
                     pnl = exit_value - pos.size_usd
@@ -340,8 +352,6 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     )
                     _apply_realized_pnl(state, pnl, now, logger, reason, {"token_address": pos.token_address})
                     state.active_position = None
-                    state.last_trade_ts_iso = iso_utc(now)
-                    token_last_trade_iso[pos.token_address] = iso_utc(now)
                     logger.trade(result)
                     logger.event(
                         "position_closed",
