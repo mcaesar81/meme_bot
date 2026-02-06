@@ -1,8 +1,8 @@
 # meme_bot
 
 Config-first Python skeleton for a crypto meme-coin trading bot (Windows + Raspberry Pi compatible), now with:
-- **Primary web dashboard** (FastAPI) in `ui_web/`
-- **Windows system tray controller** in `ui_tray/` that only talks to web API
+- **Primary web dashboard** (FastAPI) in `ui_web/` that now also manages bot runtime
+- **Windows system tray controller** in `ui_tray/` remains optional and talks to the web API
 
 ## Features
 - `config.yaml` knobs for risk limits, trade sizing, slippage, cooldowns, pause durations, and filters.
@@ -85,25 +85,21 @@ meme_bot/
    ```
 3. Edit `config.yaml` placeholders.
 
-## Run components (separate terminals)
+## Run (single command)
 
-### Terminal 1: bot engine
 ```bash
-python run_bot.py
+python run_app.py
 ```
 
-### Terminal 2: web dashboard + control API
-```bash
-python run_web_ui.py
-```
 Then open: `http://127.0.0.1:8000/`
 
-### Terminal 3: tray controller (Windows)
-```bash
-python run_tray.py
-```
+### Optional components
+- Legacy bot-only runner: `python run_bot.py`
+- Legacy web-only runner: `python run_web_ui.py`
+- Optional tray controller (Windows): `python run_tray.py`
 
 ## Notes
 - `RealExecutor` is intentionally a stub (no live trading implementation).
 - Data providers are HTTP stubs with placeholder URLs + parse blocks.
 - Tray requires Windows with system tray support (`pystray`, `pillow`).
+- Treat this repository as the source of truth for current behavior and configuration defaults.

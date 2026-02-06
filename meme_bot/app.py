@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from threading import Event
 
 from meme_bot.config import Config
 from meme_bot.datafeed import IndexerProvider, MarketDataService, QuoteProvider
@@ -15,33 +16,36 @@ from meme_bot.state_store import RuntimeStateStore
 from meme_bot.strategy import MomentumScalpStrategy
 
 
-def run() -> None:
-    cfg = Config.load("config.yaml")
-    logger = JsonLineLogger(cfg.get("logging", "events_path"), cfg.get("logging", "trades_path"))
-    store = RuntimeStateStore(cfg.get("state_store", "runtime_state_path"))
+def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
+    last_mode: str | None = None
 
-    indexer = IndexerProvider(cfg.get("providers", "indexer"))
-    quote = QuoteProvider(cfg.get("providers", "quote"))
-    market = MarketDataService(indexer)
-    risk = RiskManager(cfg.get("risk"))
-    strategy = MomentumScalpStrategy(cfg.get("strategy"))
+    while not stop_event.is_set():
+        cfg = Config.load(cfg_path)
+        logger = JsonLineLogger(cfg.get("logging", "events_path"), cfg.get("logging", "trades_path"))
+        store = RuntimeStateStore(cfg.get("state_store", "runtime_state_path"))
 
-    mode = cfg.get("mode", default="paper")
-    executor = DummyExecutor() if mode == "paper" else RealExecutor()
+        indexer = IndexerProvider(cfg.get("providers", "indexer"))
+        quote = QuoteProvider(cfg.get("providers", "quote"))
+        market = MarketDataService(indexer)
+        risk = RiskManager(cfg.get("risk"))
+        strategy = MomentumScalpStrategy(cfg.get("strategy"))
 
-    state = store.load()
-    logger.event("bot_start", {"mode": mode, "state": asdict(state)})
+        mode = cfg.get("mode", default="paper")
+        executor = DummyExecutor() if mode == "paper" else RealExecutor()
 
-    while True:
+        state = store.load()
+        if last_mode != mode:
+            logger.event("bot_start", {"mode": mode, "state": asdict(state)})
+            last_mode = mode
+
         now = datetime.utcnow()
-        state = store.load()  # keep in sync with dashboard/tray controls
         machine = StateMachine(state)
 
         try:
             if state.mode == BotMode.SAFE:
                 logger.event("safe_mode", {"reason": state.safe_reason})
                 store.save(state)
-                time.sleep(cfg.get("loop_interval_sec", default=3))
+                stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
                 continue
 
             if state.mode == BotMode.PAUSE and machine.is_pause_over(now):
@@ -64,7 +68,7 @@ def run() -> None:
 
             if state.mode != BotMode.RUN:
                 store.save(state)
-                time.sleep(cfg.get("loop_interval_sec", default=3))
+                stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
                 continue
 
             filtered = risk.filter_candidates(candidates)
@@ -97,9 +101,9 @@ def run() -> None:
                             logger.event("entry_rejected", {"reason": "slippage_limit", "symbol": pick.symbol})
             else:
                 raw = dict(state.active_position or {})
-                for k in ("opened_at", "last_scale_in_at"):
-                    if isinstance(raw.get(k), str):
-                        raw[k] = datetime.fromisoformat(raw[k])
+                for key in ("opened_at", "last_scale_in_at"):
+                    if isinstance(raw.get(key), str):
+                        raw[key] = datetime.fromisoformat(raw[key])
                 pos = Position(**raw)
                 px = quote.get_effective_price(pos.token_address, "sell", pos.size_usd)
                 unrealized = (px - pos.entry_price_usd) * (pos.size_usd / max(pos.entry_price_usd, 1e-9))
@@ -134,15 +138,24 @@ def run() -> None:
                     state.active_position = asdict(pos)
 
             store.save(state)
-            time.sleep(cfg.get("loop_interval_sec", default=3))
+            stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
 
         except TimeoutError:
             machine.set_safe("tx_timeout")
             logger.event("safe_mode", {"reason": "tx_timeout"})
             store.save(state)
-            time.sleep(cfg.get("loop_interval_sec", default=3))
+            stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.event("loop_error", {"error": str(exc)})
             store.save(state)
-            time.sleep(cfg.get("loop_interval_sec", default=3))
+            stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
+
+
+def run() -> None:
+    stop_event = Event()
+    try:
+        run_loop(stop_event)
+    except KeyboardInterrupt:
+        stop_event.set()
+        time.sleep(0.05)
