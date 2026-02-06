@@ -1,0 +1,9 @@
+﻿# runtime artifacts
+events.log*
+trades.jsonl*
+runtime_state.json*
+config.yaml.lock
+
+# python
+__pycache__/
+*.pyc
