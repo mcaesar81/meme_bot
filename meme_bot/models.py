@@ -15,7 +15,11 @@ class BotMode(str, Enum):
 @dataclass
 class CandidateToken:
     symbol: str
+    name: str
     address: str
+    pair_address: str
+    dex_id: str
+    chain_id: str
     price_usd: float
     liquidity_usd: float
     volume_5m_usd: float
@@ -30,6 +34,10 @@ class Position:
     size_usd: float
     entry_price_usd: float
     opened_at: datetime
+    token_name: str = ""
+    pair_address: str = ""
+    dex_id: str = ""
+    chain_id: str = ""
     highest_unrealized_usd: float = 0.0
     quick_profit_taken: bool = False
     last_scale_in_at: Optional[datetime] = None
@@ -61,3 +69,10 @@ class RuntimeState:
     active_position: Optional[Dict[str, Any]] = None
     last_price_ts_iso: Optional[str] = None
     safe_reason: Optional[str] = None
+    pnl_day_realized_usd: float = 0.0
+    pnl_hour_realized_usd: float = 0.0
+    pnl_total_realized_usd: float = 0.0
+    pnl_day_bucket_local: Optional[str] = None
+    pnl_hour_bucket_local: Optional[str] = None
+    open_unrealized_usd: float = 0.0
+    equity_usd: float = 0.0
