@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
-
-from meme_bot.models import CandidateToken
+from meme_bot.utils.timefmt import now_utc
 
 
 class MarketDataService:
     def __init__(self, indexer):
         self.indexer = indexer
-        self.last_update_ts: datetime | None = None
+        self.last_update_ts = None
 
-    def get_candidates(self) -> list[CandidateToken]:
+    def get_candidates(self):
         tokens = self.indexer.fetch_universe()
-        self.last_update_ts = datetime.utcnow()
+        self.last_update_ts = now_utc()
         return tokens
