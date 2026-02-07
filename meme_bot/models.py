@@ -25,6 +25,9 @@ class CandidateToken:
     volume_5m_usd: float
     momentum_score: float
     last_update_ts: datetime
+    price_change_m5: float = 0.0
+    price_change_m15: float = 0.0
+    price_change_h1: float = 0.0
 
 
 @dataclass

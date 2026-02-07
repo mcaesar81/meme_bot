@@ -17,8 +17,14 @@ risk:
   fee_block_deterioration_usd: 0.0
   max_position_usd: 5
   slippage_limit_bps: 1500
-  min_liquidity_usd: 10000
-  min_volume_5m_usd: 5000
+  low_liquidity_usd_threshold: 15000
+  low_liquidity_slippage_bps: 800
+  min_liquidity_usd: 15000
+  min_volume_5m_usd: 8000
+  min_trend_m15_pct: 0.5
+  min_trend_h1_pct: 1.0
+  min_entry_volatility_m5_pct: 0.4
+  min_entry_volatility_fee_mult: 2.0
   trade_cooldown_sec: 20
   pause_duration_sec: 120
   exclude_token_addresses:

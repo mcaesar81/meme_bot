@@ -30,6 +30,13 @@ class RiskManager:
             return False, "liquidity_too_low"
         if candidate.volume_5m_usd < min_vol:
             return False, "volume_too_low"
+
+        min_trend_m15 = float(self.cfg.get("min_trend_m15_pct", 0))
+        min_trend_h1 = float(self.cfg.get("min_trend_h1_pct", 0))
+        if candidate.price_change_m15 < min_trend_m15:
+            return False, "trend_m15_too_weak"
+        if candidate.price_change_h1 < min_trend_h1:
+            return False, "trend_h1_too_weak"
         return True, "ok"
 
     def can_open_trade(self, state: RuntimeState, now=None) -> tuple[bool, str]:
@@ -54,11 +61,20 @@ class RiskManager:
 
         return True, "ok"
 
-    def slippage_ok(self, quote_price: float, index_price: float) -> bool:
+    def slippage_ok(self, quote_price: float, index_price: float, limit_bps: float | None = None) -> bool:
         if index_price <= 0:
             return False
         slippage = abs(quote_price - index_price) / index_price * 10_000
-        return slippage <= float(self.cfg["slippage_limit_bps"])
+        limit = float(self.cfg["slippage_limit_bps"]) if limit_bps is None else float(limit_bps)
+        return slippage <= limit
+
+    def slippage_limit_bps(self, liquidity_usd: float) -> float:
+        base_limit = float(self.cfg["slippage_limit_bps"])
+        low_liq_threshold = float(self.cfg.get("low_liquidity_usd_threshold", 0))
+        low_liq_limit = float(self.cfg.get("low_liquidity_slippage_bps", base_limit))
+        if low_liq_threshold > 0 and liquidity_usd <= low_liq_threshold:
+            return min(base_limit, low_liq_limit)
+        return base_limit
 
     def best_candidate_with_reason(self, candidates: list[CandidateToken]) -> tuple[CandidateToken | None, str]:
         if not candidates:

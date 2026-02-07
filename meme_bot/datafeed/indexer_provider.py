@@ -48,7 +48,11 @@ class IndexerProvider:
             liquidity = float((pair.get("liquidity") or {}).get("usd") or 0.0)
             volume_5m = float((pair.get("volume") or {}).get("m5") or 0.0)
             price_usd = float(pair.get("priceUsd") or 0.0)
-            momentum = float((pair.get("priceChange") or {}).get("m5") or 0.0)
+            price_change = pair.get("priceChange") or {}
+            momentum = float(price_change.get("m5") or 0.0)
+            price_change_m5 = float(price_change.get("m5") or 0.0)
+            price_change_m15 = float(price_change.get("m15") or 0.0)
+            price_change_h1 = float(price_change.get("h1") or 0.0)
 
             if not token_address or token_address == quote_address:
                 continue
@@ -78,6 +82,9 @@ class IndexerProvider:
                     liquidity_usd=liquidity,
                     volume_5m_usd=volume_5m,
                     momentum_score=momentum,
+                    price_change_m5=price_change_m5,
+                    price_change_m15=price_change_m15,
+                    price_change_h1=price_change_h1,
                     last_update_ts=now_utc(),
                 )
             )

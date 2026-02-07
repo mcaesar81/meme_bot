@@ -37,6 +37,9 @@ def _token_meta(candidate: CandidateToken) -> dict:
         "chain_id": candidate.chain_id,
         "liquidity_usd": candidate.liquidity_usd,
         "volume_m5_usd": candidate.volume_5m_usd,
+        "price_change_m5": candidate.price_change_m5,
+        "price_change_m15": candidate.price_change_m15,
+        "price_change_h1": candidate.price_change_h1,
     }
 
 
@@ -191,6 +194,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
         max_loss_per_position = float(cfg.get("risk", "max_loss_per_position_usd", default=0))
         fee_block_max_cycles = int(cfg.get("risk", "fee_block_max_cycles", default=0))
         fee_block_deterioration_usd = float(cfg.get("risk", "fee_block_deterioration_usd", default=0))
+        min_entry_vol_m5 = float(cfg.get("risk", "min_entry_volatility_m5_pct", default=0))
+        min_entry_vol_fee_mult = float(cfg.get("risk", "min_entry_volatility_fee_mult", default=0))
         summary_every_loops = int(cfg.get("logging", "summary_every_loops", default=20))
 
         state = store.load()
@@ -300,40 +305,49 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
 
                 if best_reason == "ok" and best:
                     size = strategy.initial_entry_size()
-                    reference_price = _safe_quote(quote, best.address, "buy", size)
-                    if reference_price <= 0:
-                        best_reason = "price_unavailable"
-                    elif risk.slippage_ok(reference_price, best.price_usd):
-                        result = executor.execute(best.symbol, best.address, "buy", size, reference_price)
-                        _record_trade_attempt(state, token_last_trade_iso, best.address, now)
-                        entry_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
-                        result.metadata.update(_token_meta(best))
-                        result.metadata["reference_price_usd"] = best.price_usd
-                        result.metadata["fees_est_usd"] = entry_fee
-                        state.active_position = asdict(
-                            Position(
-                                symbol=best.symbol,
-                                token_name=best.name,
-                                token_address=best.address,
-                                pair_address=best.pair_address,
-                                dex_id=best.dex_id,
-                                chain_id=best.chain_id,
-                                size_usd=result.filled_usd,
-                                entry_price_usd=result.avg_price_usd,
-                                opened_at=now,
-                                last_scale_in_at=now,
-                                last_fill_price_usd=result.avg_price_usd,
-                                fees_paid_usd=entry_fee,
-                                last_high_price_usd=result.avg_price_usd,
-                                last_high_after_partial_usd=result.avg_price_usd,
-                                range_high_price_usd=result.avg_price_usd,
-                                range_low_price_usd=result.avg_price_usd,
-                                range_window_start=now,
-                            )
-                        )
-                        logger.trade(result)
-                    else:
-                        best_reason = "slippage_too_high"
+                    entry_fee_break_even_pct = fee_bps * 2 / 100
+                    volatility_pct = abs(best.price_change_m5)
+                    if volatility_pct < min_entry_vol_m5:
+                        best_reason = "entry_volatility_too_low"
+                    elif min_entry_vol_fee_mult > 0 and volatility_pct < entry_fee_break_even_pct * min_entry_vol_fee_mult:
+                        best_reason = "entry_move_too_small_for_fees"
+                    if best_reason == "ok":
+                        reference_price = _safe_quote(quote, best.address, "buy", size)
+                        if reference_price <= 0:
+                            best_reason = "price_unavailable"
+                        else:
+                            slippage_limit = risk.slippage_limit_bps(best.liquidity_usd)
+                            if not risk.slippage_ok(reference_price, best.price_usd, slippage_limit):
+                                best_reason = "slippage_too_high"
+                            else:
+                                result = executor.execute(best.symbol, best.address, "buy", size, reference_price)
+                                _record_trade_attempt(state, token_last_trade_iso, best.address, now)
+                                entry_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
+                                result.metadata.update(_token_meta(best))
+                                result.metadata["reference_price_usd"] = best.price_usd
+                                result.metadata["fees_est_usd"] = entry_fee
+                                state.active_position = asdict(
+                                    Position(
+                                        symbol=best.symbol,
+                                        token_name=best.name,
+                                        token_address=best.address,
+                                        pair_address=best.pair_address,
+                                        dex_id=best.dex_id,
+                                        chain_id=best.chain_id,
+                                        size_usd=result.filled_usd,
+                                        entry_price_usd=result.avg_price_usd,
+                                        opened_at=now,
+                                        last_scale_in_at=now,
+                                        last_fill_price_usd=result.avg_price_usd,
+                                        fees_paid_usd=entry_fee,
+                                        last_high_price_usd=result.avg_price_usd,
+                                        last_high_after_partial_usd=result.avg_price_usd,
+                                        range_high_price_usd=result.avg_price_usd,
+                                        range_low_price_usd=result.avg_price_usd,
+                                        range_window_start=now,
+                                    )
+                                )
+                                logger.trade(result)
 
                 if best_reason != "ok":
                     payload = {
