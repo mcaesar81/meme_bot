@@ -33,7 +33,13 @@ class MomentumScalpStrategy:
         remaining = float(self.cfg["max_position_usd"]) - position.size_usd
         return max(0.0, min(step, remaining))
 
-    def should_exit(self, position: Position, now: datetime, unrealized_usd: float) -> tuple[bool, str]:
+    def should_exit(
+        self,
+        position: Position,
+        now: datetime,
+        unrealized_usd: float,
+        stall_override_sec: Optional[float] = None,
+    ) -> tuple[bool, str]:
         if unrealized_usd <= -float(self.cfg["stop_loss_usd"]):
             return True, "stop_loss"
 
@@ -44,6 +50,8 @@ class MomentumScalpStrategy:
         stall_limit = float(self.cfg["stall_exit_sec"])
         if position.quick_profit_taken:
             stall_limit = float(self.cfg["tighten_stall_after_quick_profit_sec"])
+        if stall_override_sec is not None:
+            stall_limit = min(stall_limit, stall_override_sec)
 
         if position.last_scale_in_at and (now - position.last_scale_in_at).total_seconds() >= stall_limit:
             return True, "stall_exit"

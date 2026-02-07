@@ -41,6 +41,14 @@ class Position:
     highest_unrealized_usd: float = 0.0
     quick_profit_taken: bool = False
     last_scale_in_at: Optional[datetime] = None
+    last_fill_price_usd: float = 0.0
+    max_favorable_usd: float = 0.0
+    max_adverse_usd: float = 0.0
+    fees_paid_usd: float = 0.0
+    awaiting_post_add_confirm: bool = False
+    post_add_confirm_until: Optional[datetime] = None
+    adds_blocked: bool = False
+    flat_adds_used: int = 0
 
 
 @dataclass

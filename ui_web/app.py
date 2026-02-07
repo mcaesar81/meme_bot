@@ -48,8 +48,8 @@ def _cfg() -> Config:
 
 
 def _resolved_log_paths(cfg: Config) -> tuple[str, str]:
-    events_path = cfg.resolve_path("logging", "events_path", default="events.log")
-    trades_path = cfg.resolve_path("logging", "trades_path", default="trades.jsonl")
+    events_path = cfg.resolve_path("logging", "events_path", default="data/events.log")
+    trades_path = cfg.resolve_path("logging", "trades_path", default="data/trades.jsonl")
     return events_path, trades_path
 
 
@@ -246,7 +246,7 @@ function eventClass(item) {
 }
 function tradeClass(item, idx, total) {
   const md = item.metadata || {};
-  const pnl = Number(md.realized_pnl_usd ?? item.realized_pnl_usd ?? NaN);
+  const pnl = Number(md.net_pnl_usd ?? md.realized_pnl_usd ?? item.net_pnl_usd ?? item.realized_pnl_usd ?? NaN);
   let cls = '';
   if (!Number.isNaN(pnl)) {
     if (pnl > 0.005) cls = 'trade-win';
@@ -278,7 +278,7 @@ function logText(item) {
       return `${ts} [decision] candidates=${p.candidates} passed=${p.passed_filters} blocked_by=${p.blocked_by ?? 'none'} best=${p.best ?? '-'}`;
     }
     if (item.event_type === 'position_closed') {
-      return `${ts} [position_closed] ${token} pnl=${p.realized_pnl_usd ?? p.pnl_usd ?? '-'} dex=${p.dex_id ?? '-'} pair=${p.pair_address ?? '-'}`;
+      return `${ts} [position_closed] ${token} gross=${p.gross_pnl_usd ?? '-'} fees=${p.fees_est_usd ?? '-'} net=${p.net_pnl_usd ?? '-'} hold=${p.hold_sec ?? '-'}s`;
     }
     return `${ts} [${item.event_type}] ${token} ${JSON.stringify(p)}`;
   }
@@ -286,12 +286,12 @@ function logText(item) {
   const md = item.metadata || {};
   const token = prettyToken(item);
   const ts = item.ts_local || item.ts_utc || item.ts || '-';
-  const pnl = Number(md.realized_pnl_usd ?? item.realized_pnl_usd ?? 0);
+  const pnl = Number(md.net_pnl_usd ?? md.realized_pnl_usd ?? item.net_pnl_usd ?? item.realized_pnl_usd ?? 0);
   const result = md.result || item.result || (pnl > 0.005 ? 'WIN' : (pnl < -0.005 ? 'LOSS' : 'FLAT'));
   const arrow = result === 'WIN' ? '▲' : (result === 'LOSS' ? '▼' : '');
   const signed = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`;
   if ((item.side || '').toLowerCase() === 'sell') {
-    return `${ts} ${result} ${arrow} $${signed} ${token} ${md.exit_reason || item.reason || ''}`;
+    return `${ts} ${result} ${arrow} $${signed} ${token} ${md.exit_reason || item.reason || ''} gross=${md.gross_pnl_usd ?? '-'} fees=${md.fees_est_usd ?? '-'}`;
   }
   return `${ts} [trade ${item.side || '-'}] ${token} filled=${item.filled_usd ?? '-'} price=${item.avg_price_usd ?? '-'} dex=${md.dex_id ?? '-'} chain=${md.chain_id ?? '-'} pair=${md.pair_address ?? '-'}`;
 }
@@ -301,7 +301,7 @@ async function refreshStatus() {
   statusData = await r.json();
   const mode = document.getElementById('mode');
   mode.className = 'status ' + statusData.mode;
-  mode.textContent = `Mode: ${statusData.mode} | Day: ${statusData.pnl_day_realized_usd ?? 0} | Hour: ${statusData.pnl_hour_realized_usd ?? 0} | Total: ${statusData.pnl_total_realized_usd ?? 0}`;
+  mode.textContent = `Mode: ${statusData.mode} | Day Net: ${statusData.pnl_day_realized_usd ?? 0} | Hour Net: ${statusData.pnl_hour_realized_usd ?? 0} | Total Net: ${statusData.pnl_total_realized_usd ?? 0}`;
   document.getElementById('runner').textContent = `Runner alive: ${statusData.runner_alive} | Open Unrealized: ${statusData.open_unrealized_usd ?? 0}`;
   document.getElementById('lastUpdate').textContent = `Last update: ${statusData.server_ts_local ?? '-'}`;
   document.getElementById('statusJson').textContent = JSON.stringify(statusData, null, 2);

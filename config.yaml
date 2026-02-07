@@ -12,6 +12,7 @@ risk:
   max_trades_per_day: 20
   max_loss_per_day_usd: 30
   max_loss_per_hour_usd: 10
+  max_loss_per_position_usd: 1.0
   max_position_usd: 5
   slippage_limit_bps: 1500
   min_liquidity_usd: 10000
@@ -21,17 +22,28 @@ risk:
   exclude_token_addresses:
   - So11111111111111111111111111111111111111112
   same_token_cooldown_min: 10
+  token_cooldown_bad_trades: 3
+  token_cooldown_window_min: 45
+  token_cooldown_min: 60
 strategy:
   test_entry_usd: 2
   allow_scale_in: true
   max_position_usd: 5
   scale_in_step_usd: 1
+  scale_offset_bps: 25
+  post_add_confirm_sec: 45
+  post_add_stall_exit_sec: 30
+  max_flat_adds: 0
   stop_loss_usd: 1
   stall_exit_sec: 75
   max_hold_sec: 480
   quick_profit_usd: 0.5
   quick_profit_partial_ratio: 0.5
   tighten_stall_after_quick_profit_sec: 30
+  min_net_win_usd: 0.02
+  min_net_loss_usd: 0.02
+fees:
+  fee_bps: 30
 wallets:
   vault_wallet_address: REPLACE_VAULT_WALLET
   trade_wallet_address: REPLACE_TRADE_WALLET
@@ -57,8 +69,9 @@ providers:
     timeout_sec: 10
     api_key: ''
 logging:
-  events_path: events.log
-  trades_path: trades.jsonl
+  events_path: data/events.log
+  trades_path: data/trades.jsonl
   tick_every_loops: 1
+  summary_every_loops: 20
 state_store:
-  runtime_state_path: runtime_state.json
+  runtime_state_path: data/runtime_state.json

@@ -1,0 +1,7 @@
+*.pyc
+**/__pycache__/
+events.log*
+trades.jsonl*
+runtime_state.json*
+data/
+runtime/
