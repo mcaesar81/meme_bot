@@ -462,6 +462,21 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 if not exit_now:
                     stall_override = post_add_stall_exit_sec if pos.adds_blocked and post_add_stall_exit_sec > 0 else None
                     exit_now, reason = strategy.should_exit(pos, now, unrealized, stall_override_sec=stall_override)
+                    if exit_now and reason == "stall_exit" and fee_bps > 0:
+                        fee_break_even = pos.size_usd * (fee_bps * 2 / 10_000)
+                        if unrealized < fee_break_even:
+                            exit_now = False
+                            reason = "hold_fee_gate"
+                            logger.event(
+                                "stall_exit_blocked_fee",
+                                {
+                                    "token_address": pos.token_address,
+                                    "token_symbol": pos.symbol,
+                                    "token_name": pos.token_name,
+                                    "unrealized_usd": unrealized,
+                                    "fee_break_even_usd": fee_break_even,
+                                },
+                            )
                 if exit_now or pos.size_usd <= 0:
                     result = executor.execute(pos.symbol, pos.token_address, "sell", pos.size_usd, px)
                     _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
