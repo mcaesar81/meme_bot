@@ -49,6 +49,14 @@ class Position:
     last_unrealized_usd: float = 0.0
     fee_blocked_count: int = 0
     quick_partial_at: Optional[datetime] = None
+    add_count: int = 0
+    last_high_price_usd: float = 0.0
+    last_high_after_partial_usd: float = 0.0
+    range_high_price_usd: float = 0.0
+    range_low_price_usd: float = 0.0
+    range_window_start: Optional[datetime] = None
+    max_hold_extend_until: Optional[datetime] = None
+    max_hold_extend_count: int = 0
     awaiting_post_add_confirm: bool = False
     post_add_confirm_until: Optional[datetime] = None
     adds_blocked: bool = False

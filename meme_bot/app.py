@@ -53,14 +53,6 @@ def _roll_pnl_buckets(state: RuntimeState, now: datetime) -> None:
         state.pnl_hour_realized_usd = 0.0
 
 
-def _result_label(net_pnl_usd: float, min_win_usd: float, min_loss_usd: float) -> str:
-    if net_pnl_usd >= min_win_usd:
-        return "WIN"
-    if net_pnl_usd <= -min_loss_usd:
-        return "LOSS"
-    return "FLAT"
-
-
 def _apply_realized_pnl(state: RuntimeState, pnl_usd: float, now: datetime, logger: JsonLineLogger, reason: str, token_meta: dict) -> None:
     _roll_pnl_buckets(state, now)
     state.pnl_day_realized_usd += pnl_usd
@@ -108,14 +100,30 @@ def _weighted_avg_price(current_price: float, current_size: float, added_price: 
     return (current_price * current_size + added_price * added_size) / total
 
 
+def _result_label_with_fees(net_pnl_usd: float, fees_usd: float, flat_good_ratio: float) -> str:
+    if net_pnl_usd >= 0:
+        return "WIN"
+    if flat_good_ratio > 0 and net_pnl_usd >= -fees_usd * flat_good_ratio:
+        return "FLAT_GOOD"
+    return "LOSS"
+
+
 def _load_position(raw: dict) -> Position:
     parsed = dict(raw)
-    for key in ("opened_at", "last_scale_in_at", "post_add_confirm_until", "quick_partial_at"):
+    for key in ("opened_at", "last_scale_in_at", "post_add_confirm_until", "quick_partial_at", "range_window_start", "max_hold_extend_until"):
         dt = parse_iso_datetime(parsed.get(key))
         if dt:
             parsed[key] = dt
     if parsed.get("last_fill_price_usd", 0) <= 0 and parsed.get("entry_price_usd"):
         parsed["last_fill_price_usd"] = parsed["entry_price_usd"]
+    if parsed.get("last_high_price_usd", 0) <= 0 and parsed.get("entry_price_usd"):
+        parsed["last_high_price_usd"] = parsed["entry_price_usd"]
+    if parsed.get("last_high_after_partial_usd", 0) <= 0 and parsed.get("last_high_price_usd"):
+        parsed["last_high_after_partial_usd"] = parsed["last_high_price_usd"]
+    if parsed.get("range_high_price_usd", 0) <= 0 and parsed.get("entry_price_usd"):
+        parsed["range_high_price_usd"] = parsed["entry_price_usd"]
+    if parsed.get("range_low_price_usd", 0) <= 0 and parsed.get("entry_price_usd"):
+        parsed["range_low_price_usd"] = parsed["entry_price_usd"]
     return Position(**parsed)
 
 
@@ -166,8 +174,17 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
         max_flat_adds = int(cfg.get("strategy", "max_flat_adds", default=0))
         scale_offset_bps_after_partial = float(cfg.get("strategy", "scale_offset_bps_after_partial", default=scale_offset_bps))
         post_partial_scale_cooldown_sec = float(cfg.get("strategy", "post_partial_scale_cooldown_sec", default=0))
+        quick_profit_usd = float(cfg.get("strategy", "quick_profit_usd", default=0))
         quick_partial_exit_net_usd = float(cfg.get("strategy", "quick_partial_exit_net_usd", default=0))
         salvaged_loss_usd = float(cfg.get("strategy", "salvaged_loss_usd", default=min_net_loss_usd))
+        max_adds_per_position = int(cfg.get("strategy", "max_adds_per_position", default=0))
+        scale_require_new_high_after_partial = bool(cfg.get("strategy", "scale_require_new_high_after_partial", default=False))
+        scale_volatility_window_sec = float(cfg.get("strategy", "scale_volatility_window_sec", default=0))
+        quick_profit_fee_multiplier = float(cfg.get("strategy", "quick_profit_fee_multiplier", default=1.0))
+        flat_good_fee_ratio = float(cfg.get("strategy", "flat_good_fee_ratio", default=0.0))
+        max_hold_fee_extend_sec = float(cfg.get("strategy", "max_hold_fee_extend_sec", default=0))
+        max_hold_fee_max_ext = int(cfg.get("strategy", "max_hold_fee_max_ext", default=0))
+        per_token_cooldown_sec = float(cfg.get("strategy", "per_token_cooldown_sec", default=0))
         token_bad_limit = int(cfg.get("risk", "token_cooldown_bad_trades", default=0))
         token_bad_window_min = float(cfg.get("risk", "token_cooldown_window_min", default=0))
         token_cooldown_min = float(cfg.get("risk", "token_cooldown_min", default=0))
@@ -307,6 +324,11 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                 last_scale_in_at=now,
                                 last_fill_price_usd=result.avg_price_usd,
                                 fees_paid_usd=entry_fee,
+                                last_high_price_usd=result.avg_price_usd,
+                                last_high_after_partial_usd=result.avg_price_usd,
+                                range_high_price_usd=result.avg_price_usd,
+                                range_low_price_usd=result.avg_price_usd,
+                                range_window_start=now,
                             )
                         )
                         logger.trade(result)
@@ -349,6 +371,15 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 pos.last_unrealized_usd = unrealized
                 exit_fee_est = _estimate_fee_usd(pos.size_usd, fee_bps)
                 net_unrealized = unrealized - (pos.fees_paid_usd + exit_fee_est)
+                pos.last_high_price_usd = max(pos.last_high_price_usd, px)
+                if scale_volatility_window_sec > 0:
+                    if not pos.range_window_start or (now - pos.range_window_start).total_seconds() >= scale_volatility_window_sec:
+                        pos.range_window_start = now
+                        pos.range_high_price_usd = px
+                        pos.range_low_price_usd = px
+                    else:
+                        pos.range_high_price_usd = max(pos.range_high_price_usd, px)
+                        pos.range_low_price_usd = min(pos.range_low_price_usd, px)
 
                 if (
                     pos.quick_profit_taken
@@ -379,7 +410,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             },
                         )
 
-                partial = strategy.quick_profit_partial_size(pos, unrealized)
+                quick_profit_target = max(quick_profit_usd, pos.fees_paid_usd * quick_profit_fee_multiplier)
+                partial = strategy.quick_profit_partial_size(pos, unrealized, min_profit_usd=quick_profit_target)
                 if partial > 0:
                     result = executor.execute(pos.symbol, pos.token_address, "sell", partial, px)
                     _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
@@ -391,7 +423,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     leg_fees = entry_fee_portion + exit_fee
                     leg_net_pnl = leg_gross_pnl - leg_fees
                     pos.fees_paid_usd -= entry_fee_portion
-                    leg_result = _result_label(leg_net_pnl, min_net_win_usd, min_net_loss_usd)
+                    leg_result = _result_label_with_fees(leg_net_pnl, leg_fees, flat_good_fee_ratio)
                     result.metadata.update(
                         {
                             "token_address": pos.token_address,
@@ -416,6 +448,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     pos.size_usd -= result.filled_usd
                     pos.quick_profit_taken = True
                     pos.quick_partial_at = now
+                    pos.last_high_after_partial_usd = pos.last_high_price_usd
                     pos.realized_net_usd += leg_net_pnl
                     logger.trade(result)
 
@@ -430,6 +463,14 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     elif pos.quick_profit_taken and pos.quick_partial_at:
                         if (now - pos.quick_partial_at).total_seconds() < post_partial_scale_cooldown_sec:
                             scale_reason = "post_partial_cooldown"
+                    elif max_adds_per_position > 0 and pos.add_count >= max_adds_per_position:
+                        scale_reason = "max_adds_reached"
+                    elif scale_volatility_window_sec > 0 and pos.range_window_start:
+                        range_bps = 0.0
+                        if pos.range_high_price_usd > 0:
+                            range_bps = (pos.range_high_price_usd - pos.range_low_price_usd) / pos.range_high_price_usd * 10_000
+                        if range_bps < fee_bps * 2:
+                            scale_reason = "low_volatility"
                     elif buy_px < pos.entry_price_usd:
                         scale_reason = "scale_price_below_entry"
                     elif buy_px <= pos.last_fill_price_usd:
@@ -442,6 +483,10 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                 pos.flat_adds_used += 1
                             else:
                                 scale_reason = "scale_offset_not_met"
+                        if not scale_reason and scale_require_new_high_after_partial and pos.quick_profit_taken:
+                            new_high_target = pos.last_high_after_partial_usd * (1 + offset_bps / 10_000)
+                            if buy_px < new_high_target:
+                                scale_reason = "partial_no_new_high"
 
                     if scale_reason:
                         logger.event(
@@ -481,6 +526,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                         pos.fees_paid_usd += add_fee
                         pos.last_scale_in_at = now
                         pos.last_fill_price_usd = result.avg_price_usd
+                        pos.add_count += 1
                         if post_add_confirm_sec > 0:
                             pos.awaiting_post_add_confirm = True
                             pos.post_add_confirm_until = now + timedelta(seconds=post_add_confirm_sec)
@@ -545,18 +591,35 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                 exit_now = True
                                 reason = "max_hold_fee_exit"
                             else:
-                                exit_now = False
-                                reason = "hold_fee_gate"
-                                logger.event(
-                                    "max_hold_blocked_fee",
-                                    {
-                                        "token_address": pos.token_address,
-                                        "token_symbol": pos.symbol,
-                                        "token_name": pos.token_name,
-                                        "unrealized_usd": unrealized,
-                                        "fee_break_even_usd": fee_break_even,
-                                    },
-                                )
+                                if max_hold_fee_extend_sec > 0 and (max_hold_fee_max_ext <= 0 or pos.max_hold_extend_count < max_hold_fee_max_ext):
+                                    pos.max_hold_extend_until = now + timedelta(seconds=max_hold_fee_extend_sec)
+                                    pos.max_hold_extend_count += 1
+                                    exit_now = False
+                                    reason = "hold_fee_gate"
+                                    logger.event(
+                                        "max_hold_extended",
+                                        {
+                                            "token_address": pos.token_address,
+                                            "token_symbol": pos.symbol,
+                                            "token_name": pos.token_name,
+                                            "unrealized_usd": unrealized,
+                                            "fee_break_even_usd": fee_break_even,
+                                            "extend_until": pos.max_hold_extend_until.isoformat(),
+                                        },
+                                    )
+                                else:
+                                    exit_now = False
+                                    reason = "hold_fee_gate"
+                                    logger.event(
+                                        "max_hold_blocked_fee",
+                                        {
+                                            "token_address": pos.token_address,
+                                            "token_symbol": pos.symbol,
+                                            "token_name": pos.token_name,
+                                            "unrealized_usd": unrealized,
+                                            "fee_break_even_usd": fee_break_even,
+                                        },
+                                    )
                                 pos.fee_blocked_count += 1
                                 if fee_block_max_cycles > 0 and pos.fee_blocked_count >= fee_block_max_cycles:
                                     if unrealized <= prev_unrealized - fee_block_deterioration_usd:
@@ -581,8 +644,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     exit_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
                     total_fees = pos.fees_paid_usd + exit_fee
                     net_pnl = gross_pnl - total_fees
-                    result_label = _result_label(net_pnl, min_net_win_usd, min_net_loss_usd)
-                    if pos.realized_net_usd > 0 and net_pnl <= salvaged_loss_usd:
+                    result_label = _result_label_with_fees(net_pnl, total_fees, flat_good_fee_ratio)
+                    if pos.realized_net_usd > 0 and net_pnl <= 0 and net_pnl >= -salvaged_loss_usd:
                         result_label = "SALVAGED"
                     hold_sec = (now - pos.opened_at).total_seconds()
                     profit_missed = pos.max_favorable_usd - gross_pnl
@@ -640,6 +703,18 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "chain_id": pos.chain_id,
                         },
                     )
+                    if per_token_cooldown_sec > 0:
+                        cooldown_until = now + timedelta(seconds=per_token_cooldown_sec)
+                        token_cooldowns[pos.token_address] = cooldown_until
+                        logger.event(
+                            "token_cooldown_exit",
+                            {
+                                "token_address": pos.token_address,
+                                "token_symbol": pos.symbol,
+                                "token_name": pos.token_name,
+                                "cooldown_until": cooldown_until.isoformat(),
+                            },
+                        )
                     summary_counts.update([result_label.lower()])
                     summary_hold_secs.append(hold_sec)
                     summary_pnls.append(net_pnl)

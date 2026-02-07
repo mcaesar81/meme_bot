@@ -45,7 +45,9 @@ class MomentumScalpStrategy:
             return True, "stop_loss"
 
         hold_sec = (now - position.opened_at).total_seconds()
-        if hold_sec >= float(self.cfg["max_hold_sec"]):
+        if position.max_hold_extend_until and now < position.max_hold_extend_until:
+            pass
+        elif hold_sec >= float(self.cfg["max_hold_sec"]):
             return True, "max_hold"
 
         stall_limit = float(self.cfg["stall_exit_sec"])
@@ -59,9 +61,15 @@ class MomentumScalpStrategy:
 
         return False, "hold"
 
-    def quick_profit_partial_size(self, position: Position, unrealized_usd: float) -> float:
+    def quick_profit_partial_size(
+        self,
+        position: Position,
+        unrealized_usd: float,
+        min_profit_usd: float | None = None,
+    ) -> float:
         if position.quick_profit_taken:
             return 0.0
-        if unrealized_usd < float(self.cfg["quick_profit_usd"]):
+        threshold = float(self.cfg["quick_profit_usd"]) if min_profit_usd is None else min_profit_usd
+        if unrealized_usd < threshold:
             return 0.0
         return round(position.size_usd * float(self.cfg["quick_profit_partial_ratio"]), 4)
