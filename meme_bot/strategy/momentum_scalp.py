@@ -33,26 +33,43 @@ class MomentumScalpStrategy:
         remaining = float(self.cfg["max_position_usd"]) - position.size_usd
         return max(0.0, min(step, remaining))
 
-    def should_exit(self, position: Position, now: datetime, unrealized_usd: float) -> tuple[bool, str]:
-        if unrealized_usd <= -float(self.cfg["stop_loss_usd"]):
+    def should_exit(
+        self,
+        position: Position,
+        now: datetime,
+        unrealized_usd: float,
+        net_unrealized_usd: float,
+        stall_override_sec: Optional[float] = None,
+    ) -> tuple[bool, str]:
+        if net_unrealized_usd <= -float(self.cfg["stop_loss_usd"]):
             return True, "stop_loss"
 
         hold_sec = (now - position.opened_at).total_seconds()
-        if hold_sec >= float(self.cfg["max_hold_sec"]):
+        if position.max_hold_extend_until and now < position.max_hold_extend_until:
+            pass
+        elif hold_sec >= float(self.cfg["max_hold_sec"]):
             return True, "max_hold"
 
         stall_limit = float(self.cfg["stall_exit_sec"])
         if position.quick_profit_taken:
             stall_limit = float(self.cfg["tighten_stall_after_quick_profit_sec"])
+        if stall_override_sec is not None:
+            stall_limit = min(stall_limit, stall_override_sec)
 
         if position.last_scale_in_at and (now - position.last_scale_in_at).total_seconds() >= stall_limit:
             return True, "stall_exit"
 
         return False, "hold"
 
-    def quick_profit_partial_size(self, position: Position, unrealized_usd: float) -> float:
+    def quick_profit_partial_size(
+        self,
+        position: Position,
+        unrealized_usd: float,
+        min_profit_usd: float | None = None,
+    ) -> float:
         if position.quick_profit_taken:
             return 0.0
-        if unrealized_usd < float(self.cfg["quick_profit_usd"]):
+        threshold = float(self.cfg["quick_profit_usd"]) if min_profit_usd is None else min_profit_usd
+        if unrealized_usd < threshold:
             return 0.0
         return round(position.size_usd * float(self.cfg["quick_profit_partial_ratio"]), 4)

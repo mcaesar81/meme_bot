@@ -1,10 +1,7 @@
-mode: paper  # paper | real
+mode: paper
 loop_interval_sec: 3
 state_stale_price_sec: 20
 trade_wallet_overfund_pause_usd: 150
-
-
-
 risk:
   exclude_symbols:
   - SOL
@@ -15,49 +12,86 @@ risk:
   max_trades_per_day: 20
   max_loss_per_day_usd: 30
   max_loss_per_hour_usd: 10
+  max_loss_per_position_usd: 1.0
+  fee_block_max_cycles: 3
+  fee_block_deterioration_usd: 0.0
   max_position_usd: 5
   slippage_limit_bps: 1500
-  min_liquidity_usd: 10000
-  min_volume_5m_usd: 5000
+  low_liquidity_usd_threshold: 15000
+  low_liquidity_slippage_bps: 800
+  min_liquidity_usd: 15000
+  min_volume_5m_usd: 8000
+  min_trend_m15_pct: 0.5
+  min_trend_h1_pct: 1.0
+  min_entry_volatility_m5_pct: 0.4
+  min_entry_volatility_fee_mult: 2.0
   trade_cooldown_sec: 20
   pause_duration_sec: 120
-
+  exclude_token_addresses:
+  - So11111111111111111111111111111111111111112
+  same_token_cooldown_min: 10
+  token_cooldown_bad_trades: 3
+  token_cooldown_window_min: 45
+  token_cooldown_min: 60
 strategy:
   test_entry_usd: 2
   allow_scale_in: true
   max_position_usd: 5
   scale_in_step_usd: 1
+  scale_offset_bps: 25
+  scale_offset_bps_after_partial: 50
+  post_partial_scale_cooldown_sec: 60
+  max_adds_per_position: 2
+  scale_require_new_high_after_partial: true
+  scale_volatility_window_sec: 60
+  post_add_confirm_sec: 45
+  post_add_stall_exit_sec: 30
+  max_flat_adds: 0
   stop_loss_usd: 1
   stall_exit_sec: 75
   max_hold_sec: 480
   quick_profit_usd: 0.5
   quick_profit_partial_ratio: 0.5
+  quick_profit_fee_multiplier: 1.2
+  quick_partial_exit_net_usd: 0.05
   tighten_stall_after_quick_profit_sec: 30
-
+  min_net_win_usd: 0.02
+  min_net_loss_usd: 0.02
+  salvaged_loss_usd: 0.02
+  flat_good_fee_ratio: 0.25
+  max_hold_fee_extend_sec: 60
+  max_hold_fee_max_ext: 2
+  per_token_cooldown_sec: 900
+fees:
+  fee_bps: 30
 wallets:
-  vault_wallet_address: "REPLACE_VAULT_WALLET"
-  trade_wallet_address: "REPLACE_TRADE_WALLET"
+  vault_wallet_address: REPLACE_VAULT_WALLET
+  trade_wallet_address: REPLACE_TRADE_WALLET
   trade_wallet_daily_allowance_usd: 50
-
 providers:
   indexer:
-    base_url: "https://api.dexscreener.com"
-    universe_path: "/latest/dex/search"
+    base_url: https://api.dexscreener.com
+    universe_path: /latest/dex/search
     top_n: 25
     timeout_sec: 10
-    api_key: ""
-    search_q: "solana"   # <-- add this
-
+    api_key: ''
+    search_q: solana
+    search_queries:
+    - pump
+    - usd
+    - raydium
+    chain_id: solana
+    min_unique_tokens: 3
+    top_repeat_limit: 8
   quote:
-    base_url: "https://api.dexscreener.com"
-    quote_path: "/token-pairs/v1/solana"   # <-- we will append /{token} in code
+    base_url: https://api.dexscreener.com
+    quote_path: /token-pairs/v1/solana
     timeout_sec: 10
-    api_key: ""
-
-
+    api_key: ''
 logging:
-  events_path: "events.log"
-  trades_path: "trades.jsonl"
-
+  events_path: data/events.log
+  trades_path: data/trades.jsonl
+  tick_every_loops: 1
+  summary_every_loops: 20
 state_store:
-  runtime_state_path: "runtime_state.json"
+  runtime_state_path: data/runtime_state.json

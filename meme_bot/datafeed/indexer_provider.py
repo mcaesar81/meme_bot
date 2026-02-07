@@ -1,45 +1,95 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 import requests
 
 from meme_bot.models import CandidateToken
+from meme_bot.utils.timefmt import now_utc
 
 
 class IndexerProvider:
-    """HTTP stub for indexer/universe source."""
+    """Universe source for candidate pairs/tokens."""
 
     def __init__(self, cfg: dict[str, Any]):
-        self.cfg = cfg 
+        self.cfg = cfg
         self.base_url = cfg["base_url"].rstrip("/")
         self.universe_path = cfg["universe_path"]
         self.top_n = int(cfg.get("top_n", 20))
         self.timeout_sec = int(cfg.get("timeout_sec", 10))
         self.api_key = cfg.get("api_key", "")
+        self.chain_id = str(cfg.get("chain_id", "solana"))
+        self.dex_allowlist = {d.lower() for d in cfg.get("dex_allowlist", [])}
 
     def fetch_universe(self) -> list[CandidateToken]:
         url = f"{self.base_url}{self.universe_path}"
-        q = self.cfg.get("search_q", "solana")
-        data = self._get_json(url, params={"q": q})
+        search_queries = self.cfg.get("search_queries") or [self.cfg.get("search_q", "pump"), "usd", "raydium"]
+        pairs: list[dict[str, Any]] = []
 
-        tokens = []
-        for p in data.get("pairs", [])[: self.top_n]:
-            base = (p.get("baseToken") or {})
+        for query in search_queries:
+            data = self._get_json(url, params={"q": query})
+            pairs.extend(data.get("pairs", []))
+
+        seen_addresses: set[str] = set()
+        tokens: list[CandidateToken] = []
+
+        for pair in pairs:
+            base = pair.get("baseToken") or {}
+            quote = pair.get("quoteToken") or {}
+
+            token_address = str(base.get("address") or "").strip()
+            quote_address = str(quote.get("address") or "").strip()
+            pair_address = str(pair.get("pairAddress") or "").strip()
+            token_symbol = str(base.get("symbol") or "UNKNOWN").strip()
+            quote_symbol = str(quote.get("symbol") or "").strip()
+            token_name = str(base.get("name") or token_symbol).strip()
+            dex_id = str(pair.get("dexId") or "unknown").strip()
+            chain_id = str(pair.get("chainId") or "").strip().lower()
+            liquidity = float((pair.get("liquidity") or {}).get("usd") or 0.0)
+            volume_5m = float((pair.get("volume") or {}).get("m5") or 0.0)
+            price_usd = float(pair.get("priceUsd") or 0.0)
+            price_change = pair.get("priceChange") or {}
+            momentum = float(price_change.get("m5") or 0.0)
+            price_change_m5 = float(price_change.get("m5") or 0.0)
+            price_change_m15 = float(price_change.get("m15") or 0.0)
+            price_change_h1 = float(price_change.get("h1") or 0.0)
+
+            if not token_address or token_address == quote_address:
+                continue
+            if not pair_address:
+                continue
+            if token_symbol.upper() == "SOL" and quote_symbol.upper() == "SOL":
+                continue
+            if not liquidity or not volume_5m:
+                continue
+            if chain_id and chain_id != self.chain_id:
+                continue
+            if self.dex_allowlist and dex_id.lower() not in self.dex_allowlist:
+                continue
+            if token_address in seen_addresses:
+                continue
+
+            seen_addresses.add(token_address)
             tokens.append(
                 CandidateToken(
-                    symbol=base.get("symbol", "UNKNOWN"),
-                    address=base.get("address", ""),
-                    price_usd=float(p.get("priceUsd") or 0.0),
-                    liquidity_usd=float((p.get("liquidity") or {}).get("usd") or 0.0),
-                    volume_5m_usd=float((p.get("volume") or {}).get("h24") or 0.0),  # placeholder
-                    momentum_score=float((p.get("priceChange") or {}).get("m5") or 0.0),
-                    last_update_ts=datetime.utcnow(),
+                    symbol=token_symbol,
+                    name=token_name,
+                    address=token_address,
+                    pair_address=pair_address,
+                    dex_id=dex_id,
+                    chain_id=chain_id or self.chain_id,
+                    price_usd=price_usd,
+                    liquidity_usd=liquidity,
+                    volume_5m_usd=volume_5m,
+                    momentum_score=momentum,
+                    price_change_m5=price_change_m5,
+                    price_change_m15=price_change_m15,
+                    price_change_h1=price_change_h1,
+                    last_update_ts=now_utc(),
                 )
             )
-        return tokens
 
+        return sorted(tokens, key=lambda t: t.momentum_score, reverse=True)[: self.top_n]
 
     def _get_json(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         try:
