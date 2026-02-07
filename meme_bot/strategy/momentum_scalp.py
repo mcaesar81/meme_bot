@@ -38,9 +38,10 @@ class MomentumScalpStrategy:
         position: Position,
         now: datetime,
         unrealized_usd: float,
+        net_unrealized_usd: float,
         stall_override_sec: Optional[float] = None,
     ) -> tuple[bool, str]:
-        if unrealized_usd <= -float(self.cfg["stop_loss_usd"]):
+        if net_unrealized_usd <= -float(self.cfg["stop_loss_usd"]):
             return True, "stop_loss"
 
         hold_sec = (now - position.opened_at).total_seconds()

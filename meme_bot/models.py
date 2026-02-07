@@ -45,6 +45,10 @@ class Position:
     max_favorable_usd: float = 0.0
     max_adverse_usd: float = 0.0
     fees_paid_usd: float = 0.0
+    realized_net_usd: float = 0.0
+    last_unrealized_usd: float = 0.0
+    fee_blocked_count: int = 0
+    quick_partial_at: Optional[datetime] = None
     awaiting_post_add_confirm: bool = False
     post_add_confirm_until: Optional[datetime] = None
     adds_blocked: bool = False

@@ -16,9 +16,15 @@ from meme_bot.risk import RiskManager
 from meme_bot.state_machine import StateMachine
 from meme_bot.state_store import RuntimeStateStore
 from meme_bot.strategy import MomentumScalpStrategy
+import requests
+
 from meme_bot.utils.timefmt import LOCAL_TZ, iso_utc, now_utc, parse_iso_datetime
 
 EPSILON_FLAT = 0.005
+
+
+class QuoteTimeoutError(Exception):
+    pass
 
 
 def _token_meta(candidate: CandidateToken) -> dict:
@@ -104,13 +110,20 @@ def _weighted_avg_price(current_price: float, current_size: float, added_price: 
 
 def _load_position(raw: dict) -> Position:
     parsed = dict(raw)
-    for key in ("opened_at", "last_scale_in_at", "post_add_confirm_until"):
+    for key in ("opened_at", "last_scale_in_at", "post_add_confirm_until", "quick_partial_at"):
         dt = parse_iso_datetime(parsed.get(key))
         if dt:
             parsed[key] = dt
     if parsed.get("last_fill_price_usd", 0) <= 0 and parsed.get("entry_price_usd"):
         parsed["last_fill_price_usd"] = parsed["entry_price_usd"]
     return Position(**parsed)
+
+
+def _safe_quote(quote: QuoteProvider, token_address: str, side: str, size_usd: float) -> float:
+    try:
+        return quote.get_effective_price(token_address, side, size_usd)
+    except requests.exceptions.Timeout as exc:
+        raise QuoteTimeoutError from exc
 
 
 def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
@@ -126,6 +139,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
     summary_pnls: list[float] = []
     summary_token_counts: Counter[str] = Counter()
     logged_timezone = False
+    last_quote_timeout_log: datetime | None = None
 
     while not stop_event.is_set():
         cfg = Config.load(cfg_path)
@@ -150,10 +164,16 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
         post_add_confirm_sec = float(cfg.get("strategy", "post_add_confirm_sec", default=0))
         post_add_stall_exit_sec = float(cfg.get("strategy", "post_add_stall_exit_sec", default=0))
         max_flat_adds = int(cfg.get("strategy", "max_flat_adds", default=0))
+        scale_offset_bps_after_partial = float(cfg.get("strategy", "scale_offset_bps_after_partial", default=scale_offset_bps))
+        post_partial_scale_cooldown_sec = float(cfg.get("strategy", "post_partial_scale_cooldown_sec", default=0))
+        quick_partial_exit_net_usd = float(cfg.get("strategy", "quick_partial_exit_net_usd", default=0))
+        salvaged_loss_usd = float(cfg.get("strategy", "salvaged_loss_usd", default=min_net_loss_usd))
         token_bad_limit = int(cfg.get("risk", "token_cooldown_bad_trades", default=0))
         token_bad_window_min = float(cfg.get("risk", "token_cooldown_window_min", default=0))
         token_cooldown_min = float(cfg.get("risk", "token_cooldown_min", default=0))
         max_loss_per_position = float(cfg.get("risk", "max_loss_per_position_usd", default=0))
+        fee_block_max_cycles = int(cfg.get("risk", "fee_block_max_cycles", default=0))
+        fee_block_deterioration_usd = float(cfg.get("risk", "fee_block_deterioration_usd", default=0))
         summary_every_loops = int(cfg.get("logging", "summary_every_loops", default=20))
 
         state = store.load()
@@ -263,7 +283,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
 
                 if best_reason == "ok" and best:
                     size = strategy.initial_entry_size()
-                    reference_price = quote.get_effective_price(best.address, "buy", size)
+                    reference_price = _safe_quote(quote, best.address, "buy", size)
                     if reference_price <= 0:
                         best_reason = "price_unavailable"
                     elif risk.slippage_ok(reference_price, best.price_usd):
@@ -320,11 +340,27 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
             else:
                 raw = dict(state.active_position or {})
                 pos = _load_position(raw)
-                px = quote.get_effective_price(pos.token_address, "sell", pos.size_usd)
+                px = _safe_quote(quote, pos.token_address, "sell", pos.size_usd)
                 unrealized = (px - pos.entry_price_usd) * (pos.size_usd / max(pos.entry_price_usd, 1e-9))
                 state.open_unrealized_usd = unrealized
+                prev_unrealized = pos.last_unrealized_usd
                 pos.max_favorable_usd = max(pos.max_favorable_usd, unrealized)
                 pos.max_adverse_usd = min(pos.max_adverse_usd, unrealized)
+                pos.last_unrealized_usd = unrealized
+                exit_fee_est = _estimate_fee_usd(pos.size_usd, fee_bps)
+                net_unrealized = unrealized - (pos.fees_paid_usd + exit_fee_est)
+
+                if (
+                    pos.quick_profit_taken
+                    and quick_partial_exit_net_usd > 0
+                    and pos.realized_net_usd >= quick_partial_exit_net_usd
+                    and unrealized <= 0
+                ):
+                    exit_now = True
+                    reason = "quick_partial_exit"
+                else:
+                    exit_now = False
+                    reason = "hold"
 
                 if pos.awaiting_post_add_confirm and pos.post_add_confirm_until:
                     if px > pos.last_fill_price_usd:
@@ -379,22 +415,28 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     _apply_realized_pnl(state, leg_net_pnl, now, logger, "quick_profit_partial", {"token_address": pos.token_address})
                     pos.size_usd -= result.filled_usd
                     pos.quick_profit_taken = True
+                    pos.quick_partial_at = now
+                    pos.realized_net_usd += leg_net_pnl
                     logger.trade(result)
 
                 scale = strategy.maybe_scale_in_size(pos, now, unrealized)
                 if scale > 0:
-                    buy_px = quote.get_effective_price(pos.token_address, "buy", scale)
+                    buy_px = _safe_quote(quote, pos.token_address, "buy", scale)
                     scale_reason = None
                     if pos.adds_blocked:
                         scale_reason = "adds_blocked"
                     elif pos.awaiting_post_add_confirm:
                         scale_reason = "awaiting_post_add_confirm"
+                    elif pos.quick_profit_taken and pos.quick_partial_at:
+                        if (now - pos.quick_partial_at).total_seconds() < post_partial_scale_cooldown_sec:
+                            scale_reason = "post_partial_cooldown"
                     elif buy_px < pos.entry_price_usd:
                         scale_reason = "scale_price_below_entry"
                     elif buy_px <= pos.last_fill_price_usd:
                         scale_reason = "scale_price_not_improved"
                     else:
-                        required_px = pos.last_fill_price_usd * (1 + scale_offset_bps / 10_000)
+                        offset_bps = scale_offset_bps_after_partial if pos.quick_profit_taken else scale_offset_bps
+                        required_px = pos.last_fill_price_usd * (1 + offset_bps / 10_000)
                         if buy_px < required_px:
                             if max_flat_adds > pos.flat_adds_used and buy_px >= pos.entry_price_usd:
                                 pos.flat_adds_used += 1
@@ -444,8 +486,6 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             pos.post_add_confirm_until = now + timedelta(seconds=post_add_confirm_sec)
                         logger.trade(result)
 
-                exit_now = False
-                reason = "hold"
                 if max_loss_per_position > 0 and unrealized <= -max_loss_per_position:
                     exit_now = True
                     reason = "hard_stop_exit"
@@ -461,7 +501,13 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     )
                 if not exit_now:
                     stall_override = post_add_stall_exit_sec if pos.adds_blocked and post_add_stall_exit_sec > 0 else None
-                    exit_now, reason = strategy.should_exit(pos, now, unrealized, stall_override_sec=stall_override)
+                    exit_now, reason = strategy.should_exit(
+                        pos,
+                        now,
+                        unrealized,
+                        net_unrealized,
+                        stall_override_sec=stall_override,
+                    )
                     if exit_now and reason == "stall_exit" and fee_bps > 0:
                         fee_break_even = pos.size_usd * (fee_bps * 2 / 10_000)
                         if unrealized < fee_break_even:
@@ -477,6 +523,55 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                     "fee_break_even_usd": fee_break_even,
                                 },
                             )
+                            pos.fee_blocked_count += 1
+                            if fee_block_max_cycles > 0 and pos.fee_blocked_count >= fee_block_max_cycles:
+                                if unrealized <= prev_unrealized - fee_block_deterioration_usd:
+                                    exit_now = True
+                                    reason = "fee_block_timeout_exit"
+                                    logger.event(
+                                        "fee_block_timeout_exit",
+                                        {
+                                            "token_address": pos.token_address,
+                                            "token_symbol": pos.symbol,
+                                            "token_name": pos.token_name,
+                                            "fee_blocked_count": pos.fee_blocked_count,
+                                            "unrealized_usd": unrealized,
+                                        },
+                                    )
+                    if exit_now and reason == "max_hold" and fee_bps > 0:
+                        fee_break_even = pos.size_usd * (fee_bps * 2 / 10_000)
+                        if unrealized < fee_break_even:
+                            if unrealized <= prev_unrealized - fee_block_deterioration_usd:
+                                exit_now = True
+                                reason = "max_hold_fee_exit"
+                            else:
+                                exit_now = False
+                                reason = "hold_fee_gate"
+                                logger.event(
+                                    "max_hold_blocked_fee",
+                                    {
+                                        "token_address": pos.token_address,
+                                        "token_symbol": pos.symbol,
+                                        "token_name": pos.token_name,
+                                        "unrealized_usd": unrealized,
+                                        "fee_break_even_usd": fee_break_even,
+                                    },
+                                )
+                                pos.fee_blocked_count += 1
+                                if fee_block_max_cycles > 0 and pos.fee_blocked_count >= fee_block_max_cycles:
+                                    if unrealized <= prev_unrealized - fee_block_deterioration_usd:
+                                        exit_now = True
+                                        reason = "fee_block_timeout_exit"
+                                        logger.event(
+                                            "fee_block_timeout_exit",
+                                            {
+                                                "token_address": pos.token_address,
+                                                "token_symbol": pos.symbol,
+                                                "token_name": pos.token_name,
+                                                "fee_blocked_count": pos.fee_blocked_count,
+                                                "unrealized_usd": unrealized,
+                                            },
+                                        )
                 if exit_now or pos.size_usd <= 0:
                     result = executor.execute(pos.symbol, pos.token_address, "sell", pos.size_usd, px)
                     _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
@@ -487,6 +582,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     total_fees = pos.fees_paid_usd + exit_fee
                     net_pnl = gross_pnl - total_fees
                     result_label = _result_label(net_pnl, min_net_win_usd, min_net_loss_usd)
+                    if pos.realized_net_usd > 0 and net_pnl <= salvaged_loss_usd:
+                        result_label = "SALVAGED"
                     hold_sec = (now - pos.opened_at).total_seconds()
                     profit_missed = pos.max_favorable_usd - gross_pnl
                     result.metadata.update(
@@ -594,6 +691,14 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
         except TimeoutError:
             machine.set_safe("tx_timeout")
             logger.event("safe_mode", {"reason": "tx_timeout"})
+            store.save(state)
+            stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
+
+        except QuoteTimeoutError:
+            now = now_utc()
+            if not last_quote_timeout_log or (now - last_quote_timeout_log).total_seconds() >= 60:
+                logger.event("quote_timeout", {"message": "quote request timed out"})
+                last_quote_timeout_log = now
             store.save(state)
             stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
 

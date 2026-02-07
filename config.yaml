@@ -13,6 +13,8 @@ risk:
   max_loss_per_day_usd: 30
   max_loss_per_hour_usd: 10
   max_loss_per_position_usd: 1.0
+  fee_block_max_cycles: 3
+  fee_block_deterioration_usd: 0.0
   max_position_usd: 5
   slippage_limit_bps: 1500
   min_liquidity_usd: 10000
@@ -31,6 +33,8 @@ strategy:
   max_position_usd: 5
   scale_in_step_usd: 1
   scale_offset_bps: 25
+  scale_offset_bps_after_partial: 50
+  post_partial_scale_cooldown_sec: 60
   post_add_confirm_sec: 45
   post_add_stall_exit_sec: 30
   max_flat_adds: 0
@@ -39,9 +43,11 @@ strategy:
   max_hold_sec: 480
   quick_profit_usd: 0.5
   quick_profit_partial_ratio: 0.5
+  quick_partial_exit_net_usd: 0.05
   tighten_stall_after_quick_profit_sec: 30
   min_net_win_usd: 0.02
   min_net_loss_usd: 0.02
+  salvaged_loss_usd: 0.02
 fees:
   fee_bps: 30
 wallets:
