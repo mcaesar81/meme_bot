@@ -79,10 +79,11 @@ meme_bot/
      python3 -m venv .venv
      source .venv/bin/activate
      ```
-2. Install deps:
+2. Install deps (includes FastAPI + WebSocket support via `uvicorn[standard]` and `websockets`):
    ```bash
    pip install -r requirements.txt
    ```
+   This avoids runtime warnings like `Unsupported upgrade request` / `No supported WebSocket library detected`.
 3. Edit `config.yaml` placeholders.
 
 ## Run (single command)
