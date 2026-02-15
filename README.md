@@ -85,6 +85,7 @@ meme_bot/
    ```
    This avoids runtime warnings like `Unsupported upgrade request` / `No supported WebSocket library detected`.
 3. Edit `config.yaml` placeholders.
+   - For Jupiter auth, prefer setting `providers.jupiter.api_key_env: JUP_API_KEY` and exporting the env var instead of hardcoding `api_key` in config.
 
 ## Run (single command)
 

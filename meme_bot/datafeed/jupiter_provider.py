@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -16,6 +17,10 @@ class JupiterProvider:
         self.timeout_sec = float(cfg.get("timeout_sec", 3))
         self.slippage_bps = int(cfg.get("slippage_bps", 150))
         self.cache_ttl_sec = max(0.0, float(cfg.get("cache_ttl_sec", 2)))
+        self.api_key = str(cfg.get("api_key", "")).strip()
+        api_key_env = str(cfg.get("api_key_env", "")).strip()
+        if not self.api_key and api_key_env:
+            self.api_key = str(os.environ.get(api_key_env, "")).strip()
         self.usdc_mint = str(cfg.get("usdc_mint", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"))
         self.usdc_decimals = int(cfg.get("usdc_decimals", 6))
         self._quote_cache = quote_cache if quote_cache is not None else {}
@@ -68,6 +73,11 @@ class JupiterProvider:
             payload["quote_error"] = str(exc)
             return payload
 
+    def _headers(self) -> dict[str, str]:
+        if self.api_key:
+            return {"x-api-key": self.api_key}
+        return {}
+
     def _fetch_quote(self, token_mint: str, side: str, notional_usd: float, mid_price_usd: float) -> dict[str, Any]:
         if side == "buy":
             amount_atoms = max(1, int(round(notional_usd * (10**self.usdc_decimals))))
@@ -98,7 +108,7 @@ class JupiterProvider:
         if cached is not None:
             return cached
 
-        response = requests.get(url, params=params, timeout=self.timeout_sec)
+        response = requests.get(url, params=params, headers=self._headers(), timeout=self.timeout_sec)
         response.raise_for_status()
         data = response.json()
         self._cache_set(self._quote_cache, cache_key, data)
@@ -117,7 +127,7 @@ class JupiterProvider:
 
         path = self.token_path_template.replace("{mint}", mint)
         url = f"{self.base_url}{path}"
-        response = requests.get(url, timeout=self.timeout_sec)
+        response = requests.get(url, headers=self._headers(), timeout=self.timeout_sec)
         response.raise_for_status()
         data = response.json() if response.text else {}
         self._cache_set(self._token_cache, cache_key, data)

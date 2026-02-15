@@ -95,6 +95,8 @@ providers:
     base_url: https://api.jup.ag
     quote_path: /swap/v1/quote
     token_path_template: /tokens/v1/token/{mint}
+    api_key: ""
+    api_key_env: JUP_API_KEY
     slippage_bps: 150
     timeout_sec: 3
     cache_ttl_sec: 2
