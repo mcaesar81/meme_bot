@@ -25,6 +25,9 @@ risk:
   min_trend_h1_pct: 1.0
   min_entry_volatility_m5_pct: 0.4
   min_entry_volatility_fee_mult: 2.0
+  max_quote_price_impact_pct: 0
+  max_expected_total_cost_pct: 0
+  min_expected_edge_to_cost_mult: 0
   trade_cooldown_sec: 20
   pause_duration_sec: 120
   exclude_token_addresses:
@@ -88,6 +91,13 @@ providers:
     quote_path: /token-pairs/v1/solana
     timeout_sec: 10
     api_key: ''
+  jupiter:
+    base_url: https://api.jup.ag
+    quote_path: /swap/v1/quote
+    token_path_template: /tokens/v1/token/{mint}
+    slippage_bps: 150
+    timeout_sec: 3
+    cache_ttl_sec: 2
 logging:
   events_path: data/events.log
   trades_path: data/trades.jsonl

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from threading import Event
 
 from meme_bot.config import Config
-from meme_bot.datafeed import IndexerProvider, MarketDataService, QuoteProvider
+from meme_bot.datafeed import IndexerProvider, JupiterProvider, MarketDataService, QuoteProvider
 from meme_bot.execution import DummyExecutor, RealExecutor
 from meme_bot.logger import JsonLineLogger
 from meme_bot.models import BotMode, CandidateToken, Position, RuntimeState
@@ -111,6 +111,25 @@ def _result_label_with_fees(net_pnl_usd: float, fees_usd: float, flat_good_ratio
     return "LOSS"
 
 
+def _quote_enrichment_defaults() -> dict:
+    return {
+        "quote_in_amount": None,
+        "quote_out_amount": None,
+        "quote_price_impact_pct": None,
+        "quote_route_labels": None,
+        "expected_total_cost_pct": None,
+        "expected_total_cost_usd": None,
+        "fees_est_usd_quote": None,
+        "quote_error": None,
+    }
+
+
+def _with_config_fee_fields(payload: dict, fee_usd: float) -> dict:
+    payload["fees_est_usd"] = fee_usd
+    payload["fees_est_usd_config"] = fee_usd
+    return payload
+
+
 def _load_position(raw: dict) -> Position:
     parsed = dict(raw)
     for key in ("opened_at", "last_scale_in_at", "post_add_confirm_until", "quick_partial_at", "range_window_start", "max_hold_extend_until"):
@@ -151,6 +170,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
     summary_token_counts: Counter[str] = Counter()
     logged_timezone = False
     last_quote_timeout_log: datetime | None = None
+    jupiter_quote_cache: dict[str, tuple[float, dict]] = {}
 
     while not stop_event.is_set():
         cfg = Config.load(cfg_path)
@@ -162,6 +182,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
 
         indexer = IndexerProvider(cfg.get("providers", "indexer"))
         quote = QuoteProvider(cfg.get("providers", "quote"))
+        jupiter = JupiterProvider(cfg.get("providers", "jupiter", default={}), quote_cache=jupiter_quote_cache)
         market = MarketDataService(indexer)
         risk = RiskManager(cfg.get("risk"))
         strategy = MomentumScalpStrategy(cfg.get("strategy"))
@@ -196,6 +217,9 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
         fee_block_deterioration_usd = float(cfg.get("risk", "fee_block_deterioration_usd", default=0))
         min_entry_vol_m5 = float(cfg.get("risk", "min_entry_volatility_m5_pct", default=0))
         min_entry_vol_fee_mult = float(cfg.get("risk", "min_entry_volatility_fee_mult", default=0))
+        max_quote_price_impact_pct = float(cfg.get("risk", "max_quote_price_impact_pct", default=0))
+        max_expected_total_cost_pct = float(cfg.get("risk", "max_expected_total_cost_pct", default=0))
+        min_expected_edge_to_cost_mult = float(cfg.get("risk", "min_expected_edge_to_cost_mult", default=0))
         summary_every_loops = int(cfg.get("logging", "summary_every_loops", default=20))
 
         state = store.load()
@@ -303,6 +327,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             },
                         )
 
+                entry_quote_data = _quote_enrichment_defaults()
                 if best_reason == "ok" and best:
                     size = strategy.initial_entry_size()
                     entry_fee_break_even_pct = fee_bps * 2 / 100
@@ -320,34 +345,48 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             if not risk.slippage_ok(reference_price, best.price_usd, slippage_limit):
                                 best_reason = "slippage_too_high"
                             else:
-                                result = executor.execute(best.symbol, best.address, "buy", size, reference_price)
-                                _record_trade_attempt(state, token_last_trade_iso, best.address, now)
-                                entry_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
-                                result.metadata.update(_token_meta(best))
-                                result.metadata["reference_price_usd"] = best.price_usd
-                                result.metadata["fees_est_usd"] = entry_fee
-                                state.active_position = asdict(
-                                    Position(
-                                        symbol=best.symbol,
-                                        token_name=best.name,
-                                        token_address=best.address,
-                                        pair_address=best.pair_address,
-                                        dex_id=best.dex_id,
-                                        chain_id=best.chain_id,
-                                        size_usd=result.filled_usd,
-                                        entry_price_usd=result.avg_price_usd,
-                                        opened_at=now,
-                                        last_scale_in_at=now,
-                                        last_fill_price_usd=result.avg_price_usd,
-                                        fees_paid_usd=entry_fee,
-                                        last_high_price_usd=result.avg_price_usd,
-                                        last_high_after_partial_usd=result.avg_price_usd,
-                                        range_high_price_usd=result.avg_price_usd,
-                                        range_low_price_usd=result.avg_price_usd,
-                                        range_window_start=now,
+                                if mode == "paper":
+                                    entry_quote_data = jupiter.quote_for_swap(best.address, "buy", size, best.price_usd)
+                                    expected_cost_pct = entry_quote_data.get("expected_total_cost_pct")
+                                    impact_pct = entry_quote_data.get("quote_price_impact_pct")
+                                    if max_quote_price_impact_pct > 0 and impact_pct is not None and impact_pct > max_quote_price_impact_pct:
+                                        best_reason = "quote_price_impact_too_high"
+                                    elif max_expected_total_cost_pct > 0 and expected_cost_pct is not None and expected_cost_pct > max_expected_total_cost_pct:
+                                        best_reason = "expected_total_cost_too_high"
+                                    elif min_expected_edge_to_cost_mult > 0 and expected_cost_pct is not None:
+                                        expected_edge_pct = max(0.0, best.price_change_m5)  # edge proxy = positive m5 trend percent
+                                        if expected_edge_pct < expected_cost_pct * min_expected_edge_to_cost_mult:
+                                            best_reason = "edge_below_expected_cost_multiple"
+                                if best_reason == "ok":
+                                    result = executor.execute(best.symbol, best.address, "buy", size, reference_price)
+                                    _record_trade_attempt(state, token_last_trade_iso, best.address, now)
+                                    entry_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
+                                    result.metadata.update(_token_meta(best))
+                                    result.metadata["reference_price_usd"] = best.price_usd
+                                    _with_config_fee_fields(result.metadata, entry_fee)
+                                    result.metadata.update(entry_quote_data)
+                                    state.active_position = asdict(
+                                        Position(
+                                            symbol=best.symbol,
+                                            token_name=best.name,
+                                            token_address=best.address,
+                                            pair_address=best.pair_address,
+                                            dex_id=best.dex_id,
+                                            chain_id=best.chain_id,
+                                            size_usd=result.filled_usd,
+                                            entry_price_usd=result.avg_price_usd,
+                                            opened_at=now,
+                                            last_scale_in_at=now,
+                                            last_fill_price_usd=result.avg_price_usd,
+                                            fees_paid_usd=entry_fee,
+                                            last_high_price_usd=result.avg_price_usd,
+                                            last_high_after_partial_usd=result.avg_price_usd,
+                                            range_high_price_usd=result.avg_price_usd,
+                                            range_low_price_usd=result.avg_price_usd,
+                                            range_window_start=now,
+                                        )
                                     )
-                                )
-                                logger.trade(result)
+                                    logger.trade(result)
 
                 if best_reason != "ok":
                     payload = {
@@ -362,6 +401,11 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     }
                     if best:
                         payload.update(_token_meta(best))
+                        payload["expected_edge_pct"] = max(0.0, best.price_change_m5)
+                    payload["min_expected_edge_to_cost_mult"] = min_expected_edge_to_cost_mult
+                    payload["max_quote_price_impact_pct"] = max_quote_price_impact_pct
+                    payload["max_expected_total_cost_pct"] = max_expected_total_cost_pct
+                    payload.update(entry_quote_data)
                     logger.event("no_entry", payload)
 
                 logger.event(
@@ -427,6 +471,9 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 quick_profit_target = max(quick_profit_usd, pos.fees_paid_usd * quick_profit_fee_multiplier)
                 partial = strategy.quick_profit_partial_size(pos, unrealized, min_profit_usd=quick_profit_target)
                 if partial > 0:
+                    partial_quote_data = _quote_enrichment_defaults()
+                    if mode == "paper":
+                        partial_quote_data = jupiter.quote_for_swap(pos.token_address, "sell", partial, px)
                     result = executor.execute(pos.symbol, pos.token_address, "sell", partial, px)
                     _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
                     leg_qty = partial / max(pos.entry_price_usd, 1e-9)
@@ -452,12 +499,13 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "entry_value_usd": partial,
                             "exit_value_usd": leg_exit_value,
                             "gross_pnl_usd": leg_gross_pnl,
-                            "fees_est_usd": leg_fees,
                             "net_pnl_usd": leg_net_pnl,
                             "result": leg_result,
                             "exit_reason": "quick_profit_partial",
                         }
                     )
+                    _with_config_fee_fields(result.metadata, leg_fees)
+                    result.metadata.update(partial_quote_data)
                     _apply_realized_pnl(state, leg_net_pnl, now, logger, "quick_profit_partial", {"token_address": pos.token_address})
                     pos.size_usd -= result.filled_usd
                     pos.quick_profit_taken = True
@@ -515,6 +563,9 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             },
                         )
                     elif risk.slippage_ok(buy_px, px):
+                        scale_quote_data = _quote_enrichment_defaults()
+                        if mode == "paper":
+                            scale_quote_data = jupiter.quote_for_swap(pos.token_address, "buy", scale, buy_px)
                         result = executor.execute(pos.symbol, pos.token_address, "buy", scale, buy_px)
                         _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
                         add_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
@@ -527,9 +578,10 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                 "dex_id": pos.dex_id,
                                 "chain_id": pos.chain_id,
                                 "effective_price": buy_px,
-                                "fees_est_usd": add_fee,
                             }
                         )
+                        _with_config_fee_fields(result.metadata, add_fee)
+                        result.metadata.update(scale_quote_data)
                         pos.entry_price_usd = _weighted_avg_price(
                             pos.entry_price_usd,
                             pos.size_usd,
@@ -650,6 +702,9 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                             },
                                         )
                 if exit_now or pos.size_usd <= 0:
+                    exit_quote_data = _quote_enrichment_defaults()
+                    if mode == "paper":
+                        exit_quote_data = jupiter.quote_for_swap(pos.token_address, "sell", pos.size_usd, px)
                     result = executor.execute(pos.symbol, pos.token_address, "sell", pos.size_usd, px)
                     _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
                     qty = pos.size_usd / max(pos.entry_price_usd, 1e-9)
@@ -677,7 +732,6 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "entry_value_usd": pos.size_usd,
                             "exit_value_usd": exit_value,
                             "gross_pnl_usd": gross_pnl,
-                            "fees_est_usd": total_fees,
                             "net_pnl_usd": net_pnl,
                             "result": result_label,
                             "exit_reason": reason,
@@ -687,6 +741,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "profit_missed_usd": profit_missed,
                         }
                     )
+                    _with_config_fee_fields(result.metadata, total_fees)
+                    result.metadata.update(exit_quote_data)
                     _apply_realized_pnl(state, net_pnl, now, logger, reason, {"token_address": pos.token_address})
                     state.active_position = None
                     pos.fees_paid_usd = 0.0
@@ -697,6 +753,15 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "reason": reason,
                             "gross_pnl_usd": gross_pnl,
                             "fees_est_usd": total_fees,
+                            "fees_est_usd_config": total_fees,
+                            "fees_est_usd_quote": exit_quote_data.get("fees_est_usd_quote"),
+                            "quote_in_amount": exit_quote_data.get("quote_in_amount"),
+                            "quote_out_amount": exit_quote_data.get("quote_out_amount"),
+                            "quote_price_impact_pct": exit_quote_data.get("quote_price_impact_pct"),
+                            "quote_route_labels": exit_quote_data.get("quote_route_labels"),
+                            "expected_total_cost_pct": exit_quote_data.get("expected_total_cost_pct"),
+                            "expected_total_cost_usd": exit_quote_data.get("expected_total_cost_usd"),
+                            "quote_error": exit_quote_data.get("quote_error"),
                             "net_pnl_usd": net_pnl,
                             "result": result_label,
                             "exit_reason": reason,
