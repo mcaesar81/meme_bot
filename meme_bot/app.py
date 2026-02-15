@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import traceback
+from pathlib import Path
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from meme_bot.state_machine import StateMachine
 from meme_bot.state_store import RuntimeStateStore
 from meme_bot.strategy import MomentumScalpStrategy
 import requests
+from dotenv import load_dotenv
 
 from meme_bot.utils.timefmt import LOCAL_TZ, iso_utc, now_utc, parse_iso_datetime
 
@@ -157,6 +159,10 @@ def _safe_quote(quote: QuoteProvider, token_address: str, side: str, size_usd: f
 
 
 def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
+    env_path = Path(cfg_path).resolve().parent / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=False)
+
     last_mode: str | None = None
     loop_count = 0
     repeat_top_count = 0

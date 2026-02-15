@@ -14,6 +14,7 @@ class JupiterProvider:
         self.base_url = str(cfg.get("base_url", "https://api.jup.ag")).rstrip("/")
         self.quote_path = str(cfg.get("quote_path", "/swap/v1/quote"))
         self.token_path_template = str(cfg.get("token_path_template", "/tokens/v1/token/{mint}"))
+        # TODO: Jupiter Tokens API v1 is deprecated; migrate token lookup to Tokens API v2 endpoint once finalized.
         self.timeout_sec = float(cfg.get("timeout_sec", 3))
         self.slippage_bps = int(cfg.get("slippage_bps", 150))
         self.cache_ttl_sec = max(0.0, float(cfg.get("cache_ttl_sec", 2)))

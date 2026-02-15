@@ -5,3 +5,5 @@ trades.jsonl*
 runtime_state.json*
 data/
 runtime/
+.env
+.env.*

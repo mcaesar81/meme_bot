@@ -85,7 +85,12 @@ meme_bot/
    ```
    This avoids runtime warnings like `Unsupported upgrade request` / `No supported WebSocket library detected`.
 3. Edit `config.yaml` placeholders.
-   - For Jupiter auth, prefer setting `providers.jupiter.api_key_env: JUP_API_KEY` and exporting the env var instead of hardcoding `api_key` in config.
+   - For Jupiter auth, keep `providers.jupiter.api_key_env: JUP_API_KEY` as the recommended path; `providers.jupiter.api_key` is available only as a quick local fallback.
+4. Create a local `.env` (optional, recommended for secrets):
+   ```env
+   JUP_API_KEY=your_jupiter_api_key_here
+   ```
+   The app will auto-load `.env` at startup if the file exists. `.env` is gitignored and keys are never logged.
 
 ## Run (single command)
 
@@ -103,5 +108,6 @@ Then open: `http://127.0.0.1:8000/`
 ## Notes
 - `RealExecutor` is intentionally a stub (no live trading implementation).
 - Data providers are HTTP stubs with placeholder URLs + parse blocks.
+- Jupiter token metadata currently uses Tokens API v1 path (`/tokens/v1/token/{mint}`), which is deprecated; a future update should migrate to Tokens API v2 once the replacement endpoint is confirmed.
 - Tray requires Windows with system tray support (`pystray`, `pillow`).
 - Treat this repository as the source of truth for current behavior and configuration defaults.
