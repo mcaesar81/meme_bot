@@ -170,6 +170,8 @@ def _safe_quote(quote: QuoteProvider, token_address: str, side: str, size_usd: f
 
 
 def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
+    _load_local_dotenv(cfg_path)
+
     last_mode: str | None = None
     loop_count = 0
     repeat_top_count = 0

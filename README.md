@@ -93,6 +93,7 @@ meme_bot/
    QUOTE_API_KEY=optional_quote_key
    ```
    The app auto-loads repo-root `.env` at process startup (before providers initialize). `api_key_env` remains the primary mechanism; `.env` is just a local convenience loader. `.env` is gitignored and keys are never logged.
+   This applies to both `python run_bot.py` and `python run_app.py` (web runner background bot thread).
 
 ## Run (single command)
 
