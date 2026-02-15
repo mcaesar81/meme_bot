@@ -38,6 +38,7 @@ class JupiterProvider:
             "expected_total_cost_pct": None,
             "expected_total_cost_usd": None,
             "quote_error": None,
+            "quote_warning": None,
             "fees_est_usd_quote": None,
         }
 
@@ -64,7 +65,7 @@ class JupiterProvider:
             payload["quote_out_amount"] = out_amount
             payload["quote_price_impact_pct"] = impact_pct
             payload["quote_route_labels"] = self._route_labels(quote_data)
-            payload["quote_error"] = self._combine_errors(out_err, in_err)
+            payload["quote_warning"] = self._combine_errors(out_err, in_err)
 
             cost_usd, cost_pct = self._expected_cost(
                 side=side,
@@ -95,16 +96,39 @@ class JupiterProvider:
                 "slippageBps": str(self.slippage_bps),
                 "swapMode": "ExactIn",
             }
-        else:
-            amount_atoms = max(1, int(round(notional_usd * (10**self.usdc_decimals))))
-            params = {
-                "inputMint": token_mint,
-                "outputMint": self.usdc_mint,
-                "amount": str(amount_atoms),
-                "slippageBps": str(self.slippage_bps),
-                "swapMode": "ExactOut",
-            }
+            return self._fetch_quote_request(params)
 
+        # Sell path: prefer ExactOut in USDC notional terms; fallback to ExactIn if provider rejects.
+        amount_atoms = max(1, int(round(notional_usd * (10**self.usdc_decimals))))
+        exact_out_params = {
+            "inputMint": token_mint,
+            "outputMint": self.usdc_mint,
+            "amount": str(amount_atoms),
+            "slippageBps": str(self.slippage_bps),
+            "swapMode": "ExactOut",
+        }
+        try:
+            return self._fetch_quote_request(exact_out_params)
+        except requests.HTTPError as exc:
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code != 400:
+                raise
+
+        if mid_price_usd <= 0:
+            raise ValueError("invalid_mid_price_for_sell_quote_fallback")
+        token_decimals = self._mint_decimals(token_mint)
+        token_amount = notional_usd / mid_price_usd
+        in_amount_atoms = max(1, int(round(token_amount * (10**token_decimals))))
+        exact_in_params = {
+            "inputMint": token_mint,
+            "outputMint": self.usdc_mint,
+            "amount": str(in_amount_atoms),
+            "slippageBps": str(self.slippage_bps),
+            "swapMode": "ExactIn",
+        }
+        return self._fetch_quote_request(exact_in_params)
+
+    def _fetch_quote_request(self, params: dict[str, str]) -> dict[str, Any]:
         url = f"{self.base_url}{self.quote_path}"
         cache_key = f"{url}|{sorted(params.items())}"
         cached = self._cache_get(self._quote_cache, cache_key)
@@ -167,7 +191,7 @@ class JupiterProvider:
         quote_out_amount: float | None,
         quote_price_impact_pct: float,
     ) -> tuple[float | None, float | None]:
-        if mid_price_usd > 0 and notional_usd > 0 and quote_out_amount > 0:
+        if mid_price_usd > 0 and notional_usd > 0 and isinstance(quote_out_amount, (int, float)) and quote_out_amount > 0:
             if side == "buy":
                 mid_out_tokens = notional_usd / mid_price_usd
                 if mid_out_tokens > 0:

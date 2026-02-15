@@ -134,6 +134,7 @@ def _quote_enrichment_defaults() -> dict:
         "expected_total_cost_usd": None,
         "fees_est_usd_quote": None,
         "quote_error": None,
+        "quote_warning": None,
     }
 
 
@@ -777,6 +778,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "expected_total_cost_pct": exit_quote_data.get("expected_total_cost_pct"),
                             "expected_total_cost_usd": exit_quote_data.get("expected_total_cost_usd"),
                             "quote_error": exit_quote_data.get("quote_error"),
+                            "quote_warning": exit_quote_data.get("quote_warning"),
                             "net_pnl_usd": net_pnl,
                             "result": result_label,
                             "exit_reason": reason,
