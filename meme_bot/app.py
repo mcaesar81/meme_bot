@@ -29,6 +29,17 @@ class QuoteTimeoutError(Exception):
     pass
 
 
+def _load_local_dotenv(cfg_path: str = "config.yaml") -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_env = repo_root / ".env"
+    cfg_env = Path(cfg_path).resolve().parent / ".env"
+
+    if repo_env.is_file():
+        load_dotenv(repo_env, override=False)
+    elif cfg_env.is_file():
+        load_dotenv(cfg_env, override=False)
+
+
 def _token_meta(candidate: CandidateToken) -> dict:
     return {
         "token_address": candidate.address,
@@ -159,10 +170,6 @@ def _safe_quote(quote: QuoteProvider, token_address: str, side: str, size_usd: f
 
 
 def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
-    env_path = Path(cfg_path).resolve().parent / ".env"
-    if env_path.is_file():
-        load_dotenv(env_path, override=False)
-
     last_mode: str | None = None
     loop_count = 0
     repeat_top_count = 0
@@ -869,6 +876,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
 
 
 def run() -> None:
+    _load_local_dotenv()
     stop_event = Event()
     try:
         run_loop(stop_event)
