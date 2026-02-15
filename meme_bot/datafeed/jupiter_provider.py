@@ -31,6 +31,8 @@ class JupiterProvider:
         payload = {
             "quote_in_amount": None,
             "quote_out_amount": None,
+            "quote_in_amount_raw": None,
+            "quote_out_amount_raw": None,
             "quote_price_impact_pct": None,
             "quote_route_labels": None,
             "expected_total_cost_pct": None,
@@ -46,19 +48,23 @@ class JupiterProvider:
         try:
             quote_data = self._fetch_quote(token_mint, side, notional_usd, mid_price_usd)
 
-            out_decimals = self._mint_decimals(str(quote_data.get("outputMint") or ""))
-            in_decimals = self._mint_decimals(str(quote_data.get("inputMint") or ""))
+            output_mint = str(quote_data.get("outputMint") or "")
+            input_mint = str(quote_data.get("inputMint") or "")
 
             out_amount_raw = self._to_float(quote_data.get("outAmount"))
             in_amount_raw = self._to_float(quote_data.get("inAmount"))
-            out_amount = self._normalize_amount(out_amount_raw, out_decimals)
-            in_amount = self._normalize_amount(in_amount_raw, in_decimals)
             impact_pct = self._to_float(quote_data.get("priceImpactPct"))
 
+            out_amount, out_err = self._normalize_quote_amount(output_mint, out_amount_raw)
+            in_amount, in_err = self._normalize_quote_amount(input_mint, in_amount_raw)
+
+            payload["quote_in_amount_raw"] = in_amount_raw if in_amount_raw > 0 else None
+            payload["quote_out_amount_raw"] = out_amount_raw if out_amount_raw > 0 else None
             payload["quote_in_amount"] = in_amount
             payload["quote_out_amount"] = out_amount
             payload["quote_price_impact_pct"] = impact_pct
             payload["quote_route_labels"] = self._route_labels(quote_data)
+            payload["quote_error"] = self._combine_errors(out_err, in_err)
 
             cost_usd, cost_pct = self._expected_cost(
                 side=side,
@@ -90,17 +96,13 @@ class JupiterProvider:
                 "swapMode": "ExactIn",
             }
         else:
-            if mid_price_usd <= 0:
-                raise ValueError("invalid_mid_price_for_sell_quote")
-            token_decimals = self._mint_decimals(token_mint)
-            token_amount = notional_usd / mid_price_usd
-            amount_atoms = max(1, int(round(token_amount * (10**token_decimals))))
+            amount_atoms = max(1, int(round(notional_usd * (10**self.usdc_decimals))))
             params = {
                 "inputMint": token_mint,
                 "outputMint": self.usdc_mint,
                 "amount": str(amount_atoms),
                 "slippageBps": str(self.slippage_bps),
-                "swapMode": "ExactIn",
+                "swapMode": "ExactOut",
             }
 
         url = f"{self.base_url}{self.quote_path}"
@@ -134,6 +136,25 @@ class JupiterProvider:
         self._cache_set(self._token_cache, cache_key, data)
         return int(data.get("decimals", 0))
 
+
+    def _normalize_quote_amount(self, mint: str, amount_raw: float) -> tuple[float | None, str | None]:
+        if amount_raw <= 0:
+            return None, None
+        try:
+            decimals = self._mint_decimals(mint)
+            return self._normalize_amount(amount_raw, decimals), None
+        except Exception as exc:  # noqa: BLE001
+            if mint == self.usdc_mint:
+                return self._normalize_amount(amount_raw, self.usdc_decimals), None
+            return None, f"token_decimals_unavailable:{mint}:{exc}"
+
+    @staticmethod
+    def _combine_errors(*errors: str | None) -> str | None:
+        clean = [e for e in errors if e]
+        if not clean:
+            return None
+        return " | ".join(clean)
+
     def _expected_cost(
         # expected_total_cost_pct is measured versus mid-price value:
         # - buy: (mid_tokens_out - quoted_tokens_out) / mid_tokens_out * 100
@@ -143,7 +164,7 @@ class JupiterProvider:
         side: str,
         mid_price_usd: float,
         notional_usd: float,
-        quote_out_amount: float,
+        quote_out_amount: float | None,
         quote_price_impact_pct: float,
     ) -> tuple[float | None, float | None]:
         if mid_price_usd > 0 and notional_usd > 0 and quote_out_amount > 0:
