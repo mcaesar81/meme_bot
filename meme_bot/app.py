@@ -146,7 +146,17 @@ def _with_config_fee_fields(payload: dict, fee_usd: float) -> dict:
 
 def _load_position(raw: dict) -> Position:
     parsed = dict(raw)
-    for key in ("opened_at", "last_scale_in_at", "post_add_confirm_until", "quick_partial_at", "range_window_start", "max_hold_extend_until"):
+    for key in (
+        "opened_at",
+        "last_scale_in_at",
+        "post_add_confirm_until",
+        "quick_partial_at",
+        "range_window_start",
+        "max_hold_extend_until",
+        "stop_trigger_first_detected_at",
+        "stop_trigger_last_detected_at",
+        "stop_order_submitted_at",
+    ):
         dt = parse_iso_datetime(parsed.get(key))
         if dt:
             parsed[key] = dt
@@ -168,6 +178,29 @@ def _safe_quote(quote: QuoteProvider, token_address: str, side: str, size_usd: f
         return quote.get_effective_price(token_address, side, size_usd)
     except requests.exceptions.Timeout as exc:
         raise QuoteTimeoutError from exc
+
+
+def _safe_quote_with_timeout(quote: QuoteProvider, token_address: str, side: str, size_usd: float, timeout_sec: float) -> float:
+    original_timeout = quote.timeout_sec
+    try:
+        quote.timeout_sec = max(0.05, float(timeout_sec))
+        return _safe_quote(quote, token_address, side, size_usd)
+    finally:
+        quote.timeout_sec = original_timeout
+
+
+def _apply_realized_pnl_delta(
+    state: RuntimeState,
+    pos: Position,
+    now: datetime,
+    logger: JsonLineLogger,
+    reason: str,
+) -> None:
+    pnl_delta = pos.realized_net_usd - pos.pnl_accounted_usd
+    if abs(pnl_delta) <= EPSILON_FLAT:
+        return
+    _apply_realized_pnl(state, pnl_delta, now, logger, reason, {"token_address": pos.token_address})
+    pos.pnl_accounted_usd = pos.realized_net_usd
 
 
 def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
@@ -236,6 +269,9 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
         max_quote_price_impact_pct = float(cfg.get("risk", "max_quote_price_impact_pct", default=0))
         max_expected_total_cost_pct = float(cfg.get("risk", "max_expected_total_cost_pct", default=0))
         min_expected_edge_to_cost_mult = float(cfg.get("risk", "min_expected_edge_to_cost_mult", default=0))
+        stop_watchdog_timeout_ms = float(cfg.get("strategy", "stop_watchdog_timeout_ms", default=300))
+        stop_subpoll_ms = float(cfg.get("strategy", "stop_subpoll_ms", default=0))
+        stop_subpoll_budget_ms = float(cfg.get("strategy", "stop_subpoll_budget_ms", default=0))
         summary_every_loops = int(cfg.get("logging", "summary_every_loops", default=20))
 
         state = store.load()
@@ -272,46 +308,53 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 machine.set_run()
                 logger.event("resume_run", {"at": now.isoformat()})
 
-            candidates = market.get_candidates()
-            state.last_price_ts_iso = iso_utc(now)
-
-            min_unique = int(cfg.get("providers", "indexer", "min_unique_tokens", default=3))
-            unique_addresses = {c.address for c in candidates if c.address}
-            if len(unique_addresses) < min_unique:
-                logger.event("universe_too_narrow", {"unique_tokens": len(unique_addresses), "required": min_unique})
-
-            stale_limit = int(cfg.get("state_stale_price_sec", default=20))
-            if market.last_update_ts and (now - market.last_update_ts).total_seconds() > stale_limit:
-                machine.set_pause(now + timedelta(seconds=int(cfg.get("risk", "pause_duration_sec"))), "stale_price_data")
-                logger.event("pause", {"reason": "stale_price_data"})
-
-            overfund_limit = float(cfg.get("trade_wallet_overfund_pause_usd", default=150))
-            daily_allowance = float(cfg.get("wallets", "trade_wallet_daily_allowance_usd"))
-            if daily_allowance > overfund_limit:
-                machine.set_pause(now + timedelta(seconds=int(cfg.get("risk", "pause_duration_sec"))), "trade_wallet_overfunded")
-                logger.event("pause", {"reason": "trade_wallet_overfunded"})
-
-            if state.mode != BotMode.RUN:
-                store.save(state)
-                stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
-                continue
-
-            filtered = risk.filter_candidates(candidates)
-            probe = strategy.pick_entry(candidates)
-            probe_reason = "no_candidates" if probe is None else risk.evaluate_candidate(probe)[1]
-            best = strategy.pick_entry(filtered)
+            candidates: list[CandidateToken] = []
+            filtered: list[CandidateToken] = []
+            probe: CandidateToken | None = None
+            probe_reason = "no_candidates"
+            best: CandidateToken | None = None
             best_reason = "ok"
 
-            if best:
-                if last_top_token == best.address:
-                    repeat_top_count += 1
-                else:
-                    last_top_token = best.address
-                    repeat_top_count = 1
+            if state.active_position is None:
+                candidates = market.get_candidates()
+                state.last_price_ts_iso = iso_utc(now)
 
-                top_repeat_limit = int(cfg.get("providers", "indexer", "top_repeat_limit", default=8))
-                if repeat_top_count >= top_repeat_limit:
-                    logger.event("stuck_candidate", {"repeat_count": repeat_top_count, **_token_meta(best)})
+                min_unique = int(cfg.get("providers", "indexer", "min_unique_tokens", default=3))
+                unique_addresses = {c.address for c in candidates if c.address}
+                if len(unique_addresses) < min_unique:
+                    logger.event("universe_too_narrow", {"unique_tokens": len(unique_addresses), "required": min_unique})
+
+                stale_limit = int(cfg.get("state_stale_price_sec", default=20))
+                if market.last_update_ts and (now - market.last_update_ts).total_seconds() > stale_limit:
+                    machine.set_pause(now + timedelta(seconds=int(cfg.get("risk", "pause_duration_sec"))), "stale_price_data")
+                    logger.event("pause", {"reason": "stale_price_data"})
+
+                overfund_limit = float(cfg.get("trade_wallet_overfund_pause_usd", default=150))
+                daily_allowance = float(cfg.get("wallets", "trade_wallet_daily_allowance_usd"))
+                if daily_allowance > overfund_limit:
+                    machine.set_pause(now + timedelta(seconds=int(cfg.get("risk", "pause_duration_sec"))), "trade_wallet_overfunded")
+                    logger.event("pause", {"reason": "trade_wallet_overfunded"})
+
+                if state.mode != BotMode.RUN:
+                    store.save(state)
+                    stop_event.wait(float(cfg.get("loop_interval_sec", default=3)))
+                    continue
+
+                filtered = risk.filter_candidates(candidates)
+                probe = strategy.pick_entry(candidates)
+                probe_reason = "no_candidates" if probe is None else risk.evaluate_candidate(probe)[1]
+                best = strategy.pick_entry(filtered)
+
+                if best:
+                    if last_top_token == best.address:
+                        repeat_top_count += 1
+                    else:
+                        last_top_token = best.address
+                        repeat_top_count = 1
+
+                    top_repeat_limit = int(cfg.get("providers", "indexer", "top_repeat_limit", default=8))
+                    if repeat_top_count >= top_repeat_limit:
+                        logger.event("stuck_candidate", {"repeat_count": repeat_top_count, **_token_meta(best)})
 
             if state.active_position is None:
                 allowed, reason = risk.can_open_trade(state, now)
@@ -436,7 +479,6 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
             else:
                 raw = dict(state.active_position or {})
                 pos = _load_position(raw)
-                pos.exit_in_flight = False
                 force_hold_this_tick = False
                 px = _safe_quote(quote, pos.token_address, "sell", pos.size_usd)
                 unrealized = (px - pos.entry_price_usd) * (pos.size_usd / max(pos.entry_price_usd, 1e-9))
@@ -489,6 +531,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 quick_profit_target = max(quick_profit_usd, pos.fees_paid_usd * quick_profit_fee_multiplier)
                 partial = strategy.quick_profit_partial_size(pos, unrealized, min_profit_usd=quick_profit_target)
                 if not pos.exit_in_flight and partial > 0:
+                    pos.exit_in_flight = True
                     partial_quote_data = _quote_enrichment_defaults()
                     if mode == "paper":
                         partial_quote_data = jupiter.quote_for_swap(pos.token_address, "sell", partial, px)
@@ -531,11 +574,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                         pos.quick_partial_at = now
                         pos.last_high_after_partial_usd = pos.last_high_price_usd
                         pos.realized_net_usd += leg_net_pnl
-                        pnl_delta = pos.realized_net_usd - pos.pnl_accounted_usd
-                        if pnl_delta > EPSILON_FLAT:
-                            _apply_realized_pnl(state, pnl_delta, now, logger, "quick_profit_partial", {"token_address": pos.token_address})
-                            pos.pnl_accounted_usd = pos.realized_net_usd
-                        pos.exit_in_flight = True
+                        _apply_realized_pnl_delta(state, pos, now, logger, "quick_profit_partial")
                         force_hold_this_tick = True
                     logger.trade(result)
 
@@ -626,6 +665,23 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 if (not force_hold_this_tick) and max_loss_per_position > 0 and unrealized <= -max_loss_per_position:
                     exit_now = True
                     reason = "hard_stop_exit"
+                    if pos.stop_trigger_first_detected_at is None:
+                        pos.stop_trigger_first_detected_at = now
+                        pos.stop_triggered_price_usd = px
+                        pos.stop_price_at_detection = px
+                        logger.event(
+                            "stop_triggered",
+                            {
+                                "token_address": pos.token_address,
+                                "token_symbol": pos.symbol,
+                                "token_name": pos.token_name,
+                                "unrealized_usd": unrealized,
+                                "max_loss_per_position_usd": max_loss_per_position,
+                                "stop_price_at_detection": px,
+                                "detection_ts": iso_utc(now),
+                            },
+                        )
+                    pos.stop_trigger_last_detected_at = now
                     logger.event(
                         "hard_stop_exit",
                         {
@@ -634,6 +690,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "token_name": pos.token_name,
                             "unrealized_usd": unrealized,
                             "max_loss_per_position_usd": max_loss_per_position,
+                            "stop_price_at_detection": pos.stop_price_at_detection or px,
                         },
                     )
                 if (not force_hold_this_tick) and not exit_now:
@@ -728,8 +785,40 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                         )
                 if (not force_hold_this_tick) and (exit_now or pos.size_usd <= 0):
                     exit_quote_data = _quote_enrichment_defaults()
-                    if mode == "paper":
+                    if reason == "hard_stop_exit":
+                        try:
+                            watchdog_px = _safe_quote_with_timeout(
+                                quote,
+                                pos.token_address,
+                                "sell",
+                                pos.size_usd,
+                                timeout_sec=stop_watchdog_timeout_ms / 1000,
+                            )
+                            if watchdog_px > 0:
+                                px = watchdog_px
+                        except QuoteTimeoutError:
+                            pass
+
+                        poll_start = time.time()
+                        while stop_subpoll_ms > 0 and stop_subpoll_budget_ms > 0 and (time.time() - poll_start) * 1000 < stop_subpoll_budget_ms:
+                            try:
+                                watchdog_px = _safe_quote_with_timeout(
+                                    quote,
+                                    pos.token_address,
+                                    "sell",
+                                    pos.size_usd,
+                                    timeout_sec=stop_watchdog_timeout_ms / 1000,
+                                )
+                                if watchdog_px > 0:
+                                    px = watchdog_px
+                            except QuoteTimeoutError:
+                                break
+                            time.sleep(stop_subpoll_ms / 1000)
+                    if mode == "paper" and reason != "hard_stop_exit":
                         exit_quote_data = jupiter.quote_for_swap(pos.token_address, "sell", pos.size_usd, px)
+                    pos.exit_in_flight = True
+                    pos.stop_order_submitted_at = now_utc()
+                    pos.stop_price_at_order = px
                     result = executor.execute(pos.symbol, pos.token_address, "sell", pos.size_usd, px)
                     _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
                     qty = pos.size_usd / max(pos.entry_price_usd, 1e-9)
@@ -760,6 +849,12 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "net_pnl_usd": net_pnl,
                             "result": result_label,
                             "exit_reason": reason,
+                            "stop_detection_ts": iso_utc(pos.stop_trigger_first_detected_at) if pos.stop_trigger_first_detected_at else None,
+                            "stop_trigger_ts": iso_utc(pos.stop_trigger_last_detected_at) if pos.stop_trigger_last_detected_at else None,
+                            "stop_order_submitted_ts": iso_utc(pos.stop_order_submitted_at) if pos.stop_order_submitted_at else None,
+                            "stop_detection_to_order_ms": int((pos.stop_order_submitted_at - pos.stop_trigger_first_detected_at).total_seconds() * 1000) if pos.stop_order_submitted_at and pos.stop_trigger_first_detected_at else None,
+                            "stop_price_at_detection": pos.stop_price_at_detection or None,
+                            "stop_price_at_order": pos.stop_price_at_order or None,
                             "hold_sec": hold_sec,
                             "mfe_usd": pos.max_favorable_usd,
                             "mae_usd": pos.max_adverse_usd,
@@ -769,10 +864,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     _with_config_fee_fields(result.metadata, total_fees)
                     result.metadata.update(exit_quote_data)
                     pos.realized_net_usd += net_pnl
-                    pnl_delta = pos.realized_net_usd - pos.pnl_accounted_usd
-                    if pnl_delta > EPSILON_FLAT:
-                        _apply_realized_pnl(state, pnl_delta, now, logger, reason, {"token_address": pos.token_address})
-                        pos.pnl_accounted_usd = pos.realized_net_usd
+                    _apply_realized_pnl_delta(state, pos, now, logger, reason)
                     state.active_position = None
                     pos.fees_paid_usd = 0.0
                     logger.trade(result)
@@ -795,6 +887,12 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "net_pnl_usd": net_pnl,
                             "result": result_label,
                             "exit_reason": reason,
+                            "stop_detection_ts": iso_utc(pos.stop_trigger_first_detected_at) if pos.stop_trigger_first_detected_at else None,
+                            "stop_trigger_ts": iso_utc(pos.stop_trigger_last_detected_at) if pos.stop_trigger_last_detected_at else None,
+                            "stop_order_submitted_ts": iso_utc(pos.stop_order_submitted_at) if pos.stop_order_submitted_at else None,
+                            "stop_detection_to_order_ms": int((pos.stop_order_submitted_at - pos.stop_trigger_first_detected_at).total_seconds() * 1000) if pos.stop_order_submitted_at and pos.stop_trigger_first_detected_at else None,
+                            "stop_price_at_detection": pos.stop_price_at_detection or None,
+                            "stop_price_at_order": pos.stop_price_at_order or None,
                             "entry_price": pos.entry_price_usd,
                             "exit_price": px,
                             "qty": qty,
@@ -851,8 +949,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             )
                     state.open_unrealized_usd = 0.0
                 else:
-                    pos.exit_in_flight = False
-                    state.active_position = asdict(pos)
+                        state.active_position = asdict(pos)
 
             if summary_every_loops > 0 and loop_count % summary_every_loops == 0 and summary_counts:
                 avg_hold = sum(summary_hold_secs) / max(len(summary_hold_secs), 1)

@@ -21,6 +21,8 @@ Config-first Python skeleton for a crypto meme-coin trading bot (Windows + Raspb
 - Strategy: momentum scalp
   - test entry (`$2`), optional scale-in up to `$5`.
   - exits: stop loss (`-$1`), stall (`75s`), max hold (`8m`), quick profit (`+$0.50` partial + tighter stall).
+  - active-position risk checks are evaluated before new-candidate scanning so stop exits are not delayed by entry-side enrichment/network calls.
+  - hard stop path skips optional Jupiter enrichment and logs stop detection/order latency fields for post-run diagnosis.
 - Shared file locking for config/state/log paths to reduce cross-process corruption.
 
 ## New UI architecture
