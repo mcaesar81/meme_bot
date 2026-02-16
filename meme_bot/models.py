@@ -64,6 +64,14 @@ class Position:
     post_add_confirm_until: Optional[datetime] = None
     adds_blocked: bool = False
     flat_adds_used: int = 0
+    exit_in_flight: bool = False
+    pnl_accounted_usd: float = 0.0
+    stop_trigger_first_detected_at: Optional[datetime] = None
+    stop_trigger_last_detected_at: Optional[datetime] = None
+    stop_triggered_price_usd: float = 0.0
+    stop_order_submitted_at: Optional[datetime] = None
+    stop_price_at_detection: float = 0.0
+    stop_price_at_order: float = 0.0
 
 
 @dataclass

@@ -21,6 +21,8 @@ Config-first Python skeleton for a crypto meme-coin trading bot (Windows + Raspb
 - Strategy: momentum scalp
   - test entry (`$2`), optional scale-in up to `$5`.
   - exits: stop loss (`-$1`), stall (`75s`), max hold (`8m`), quick profit (`+$0.50` partial + tighter stall).
+  - active-position risk checks are evaluated before new-candidate scanning so stop exits are not delayed by entry-side enrichment/network calls.
+  - hard stop path skips optional Jupiter enrichment and logs stop detection/order latency fields for post-run diagnosis.
 - Shared file locking for config/state/log paths to reduce cross-process corruption.
 
 ## New UI architecture
@@ -79,11 +81,21 @@ meme_bot/
      python3 -m venv .venv
      source .venv/bin/activate
      ```
-2. Install deps:
+2. Install deps (includes FastAPI + WebSocket support via `uvicorn[standard]` and `websockets`):
    ```bash
    pip install -r requirements.txt
    ```
+   This avoids runtime warnings like `Unsupported upgrade request` / `No supported WebSocket library detected`.
 3. Edit `config.yaml` placeholders.
+   - For Jupiter auth, keep `providers.jupiter.api_key_env: JUP_API_KEY` as the recommended path; `providers.jupiter.api_key` is available only as a quick local fallback.
+4. Create a local `.env` (optional, recommended for secrets):
+   ```env
+   JUP_API_KEY=your_jupiter_api_key_here
+   INDEXER_API_KEY=optional_indexer_key
+   QUOTE_API_KEY=optional_quote_key
+   ```
+   The app auto-loads repo-root `.env` at process startup (before providers initialize). `api_key_env` remains the primary mechanism; `.env` is just a local convenience loader. `.env` is gitignored and keys are never logged.
+   This applies to both `python run_bot.py` and `python run_app.py` (web runner background bot thread).
 
 ## Run (single command)
 
@@ -101,5 +113,6 @@ Then open: `http://127.0.0.1:8000/`
 ## Notes
 - `RealExecutor` is intentionally a stub (no live trading implementation).
 - Data providers are HTTP stubs with placeholder URLs + parse blocks.
+- Jupiter token metadata currently uses Tokens API v1 path (`/tokens/v1/token/{mint}`), which is deprecated; a future update should migrate to Tokens API v2 once the replacement endpoint is confirmed.
 - Tray requires Windows with system tray support (`pystray`, `pillow`).
 - Treat this repository as the source of truth for current behavior and configuration defaults.

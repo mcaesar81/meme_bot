@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from threading import Event, Thread
 from typing import Any
 
-from meme_bot.app import run_loop
+from meme_bot.app import _load_local_dotenv, run_loop
 from meme_bot.config import Config
 from meme_bot.state_machine import StateMachine
 from meme_bot.state_store import RuntimeStateStore
@@ -20,6 +20,7 @@ class BotRunner:
         if self.is_alive:
             return False
 
+        _load_local_dotenv(self.cfg_path)
         self._stop_event = Event()
         self._thread = Thread(target=run_loop, args=(self._stop_event, self.cfg_path), daemon=True, name="meme_bot_runner")
         self._thread.start()
