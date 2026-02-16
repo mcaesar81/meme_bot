@@ -436,6 +436,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
             else:
                 raw = dict(state.active_position or {})
                 pos = _load_position(raw)
+                pos.exit_in_flight = False
+                force_hold_this_tick = False
                 px = _safe_quote(quote, pos.token_address, "sell", pos.size_usd)
                 unrealized = (px - pos.entry_price_usd) * (pos.size_usd / max(pos.entry_price_usd, 1e-9))
                 state.open_unrealized_usd = unrealized
@@ -486,52 +488,59 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
 
                 quick_profit_target = max(quick_profit_usd, pos.fees_paid_usd * quick_profit_fee_multiplier)
                 partial = strategy.quick_profit_partial_size(pos, unrealized, min_profit_usd=quick_profit_target)
-                if partial > 0:
+                if not pos.exit_in_flight and partial > 0:
                     partial_quote_data = _quote_enrichment_defaults()
                     if mode == "paper":
                         partial_quote_data = jupiter.quote_for_swap(pos.token_address, "sell", partial, px)
                     result = executor.execute(pos.symbol, pos.token_address, "sell", partial, px)
                     _record_trade_attempt(state, token_last_trade_iso, pos.token_address, now)
-                    leg_qty = partial / max(pos.entry_price_usd, 1e-9)
-                    leg_exit_value = leg_qty * px
-                    entry_fee_portion = pos.fees_paid_usd * (partial / max(pos.size_usd, 1e-9))
-                    exit_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
-                    leg_gross_pnl = leg_exit_value - partial
-                    leg_fees = entry_fee_portion + exit_fee
-                    leg_net_pnl = leg_gross_pnl - leg_fees
-                    pos.fees_paid_usd -= entry_fee_portion
-                    leg_result = _result_label_with_fees(leg_net_pnl, leg_fees, flat_good_fee_ratio)
-                    result.metadata.update(
-                        {
-                            "token_address": pos.token_address,
-                            "token_symbol": pos.symbol,
-                            "token_name": pos.token_name,
-                            "pair_address": pos.pair_address,
-                            "dex_id": pos.dex_id,
-                            "chain_id": pos.chain_id,
-                            "entry_price": pos.entry_price_usd,
-                            "exit_price": px,
-                            "qty": leg_qty,
-                            "entry_value_usd": partial,
-                            "exit_value_usd": leg_exit_value,
-                            "gross_pnl_usd": leg_gross_pnl,
-                            "net_pnl_usd": leg_net_pnl,
-                            "result": leg_result,
-                            "exit_reason": "quick_profit_partial",
-                        }
-                    )
-                    _with_config_fee_fields(result.metadata, leg_fees)
-                    result.metadata.update(partial_quote_data)
-                    _apply_realized_pnl(state, leg_net_pnl, now, logger, "quick_profit_partial", {"token_address": pos.token_address})
-                    pos.size_usd -= result.filled_usd
-                    pos.quick_profit_taken = True
-                    pos.quick_partial_at = now
-                    pos.last_high_after_partial_usd = pos.last_high_price_usd
-                    pos.realized_net_usd += leg_net_pnl
+                    filled_partial = max(0.0, float(result.filled_usd))
+                    if filled_partial > 0:
+                        leg_qty = filled_partial / max(pos.entry_price_usd, 1e-9)
+                        leg_exit_value = leg_qty * px
+                        entry_fee_portion = pos.fees_paid_usd * (filled_partial / max(pos.size_usd, 1e-9))
+                        exit_fee = _estimate_fee_usd(filled_partial, fee_bps)
+                        leg_gross_pnl = leg_exit_value - filled_partial
+                        leg_fees = entry_fee_portion + exit_fee
+                        leg_net_pnl = leg_gross_pnl - leg_fees
+                        pos.fees_paid_usd -= entry_fee_portion
+                        leg_result = _result_label_with_fees(leg_net_pnl, leg_fees, flat_good_fee_ratio)
+                        result.metadata.update(
+                            {
+                                "token_address": pos.token_address,
+                                "token_symbol": pos.symbol,
+                                "token_name": pos.token_name,
+                                "pair_address": pos.pair_address,
+                                "dex_id": pos.dex_id,
+                                "chain_id": pos.chain_id,
+                                "entry_price": pos.entry_price_usd,
+                                "exit_price": px,
+                                "qty": leg_qty,
+                                "entry_value_usd": filled_partial,
+                                "exit_value_usd": leg_exit_value,
+                                "gross_pnl_usd": leg_gross_pnl,
+                                "net_pnl_usd": leg_net_pnl,
+                                "result": leg_result,
+                                "exit_reason": "quick_profit_partial",
+                            }
+                        )
+                        _with_config_fee_fields(result.metadata, leg_fees)
+                        result.metadata.update(partial_quote_data)
+                        pos.size_usd -= filled_partial
+                        pos.quick_profit_taken = True
+                        pos.quick_partial_at = now
+                        pos.last_high_after_partial_usd = pos.last_high_price_usd
+                        pos.realized_net_usd += leg_net_pnl
+                        pnl_delta = pos.realized_net_usd - pos.pnl_accounted_usd
+                        if pnl_delta > EPSILON_FLAT:
+                            _apply_realized_pnl(state, pnl_delta, now, logger, "quick_profit_partial", {"token_address": pos.token_address})
+                            pos.pnl_accounted_usd = pos.realized_net_usd
+                        pos.exit_in_flight = True
+                        force_hold_this_tick = True
                     logger.trade(result)
 
                 scale = strategy.maybe_scale_in_size(pos, now, unrealized)
-                if scale > 0:
+                if not force_hold_this_tick and not pos.exit_in_flight and scale > 0:
                     buy_px = _safe_quote(quote, pos.token_address, "buy", scale)
                     scale_reason = None
                     if pos.adds_blocked:
@@ -614,7 +623,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             pos.post_add_confirm_until = now + timedelta(seconds=post_add_confirm_sec)
                         logger.trade(result)
 
-                if max_loss_per_position > 0 and unrealized <= -max_loss_per_position:
+                if (not force_hold_this_tick) and max_loss_per_position > 0 and unrealized <= -max_loss_per_position:
                     exit_now = True
                     reason = "hard_stop_exit"
                     logger.event(
@@ -627,7 +636,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             "max_loss_per_position_usd": max_loss_per_position,
                         },
                     )
-                if not exit_now:
+                if (not force_hold_this_tick) and not exit_now:
                     stall_override = post_add_stall_exit_sec if pos.adds_blocked and post_add_stall_exit_sec > 0 else None
                     exit_now, reason = strategy.should_exit(
                         pos,
@@ -717,7 +726,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                                                 "unrealized_usd": unrealized,
                                             },
                                         )
-                if exit_now or pos.size_usd <= 0:
+                if (not force_hold_this_tick) and (exit_now or pos.size_usd <= 0):
                     exit_quote_data = _quote_enrichment_defaults()
                     if mode == "paper":
                         exit_quote_data = jupiter.quote_for_swap(pos.token_address, "sell", pos.size_usd, px)
@@ -759,7 +768,11 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     )
                     _with_config_fee_fields(result.metadata, total_fees)
                     result.metadata.update(exit_quote_data)
-                    _apply_realized_pnl(state, net_pnl, now, logger, reason, {"token_address": pos.token_address})
+                    pos.realized_net_usd += net_pnl
+                    pnl_delta = pos.realized_net_usd - pos.pnl_accounted_usd
+                    if pnl_delta > EPSILON_FLAT:
+                        _apply_realized_pnl(state, pnl_delta, now, logger, reason, {"token_address": pos.token_address})
+                        pos.pnl_accounted_usd = pos.realized_net_usd
                     state.active_position = None
                     pos.fees_paid_usd = 0.0
                     logger.trade(result)
@@ -838,6 +851,7 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                             )
                     state.open_unrealized_usd = 0.0
                 else:
+                    pos.exit_in_flight = False
                     state.active_position = asdict(pos)
 
             if summary_every_loops > 0 and loop_count % summary_every_loops == 0 and summary_counts:

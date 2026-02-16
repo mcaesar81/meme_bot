@@ -64,6 +64,8 @@ class Position:
     post_add_confirm_until: Optional[datetime] = None
     adds_blocked: bool = False
     flat_adds_used: int = 0
+    exit_in_flight: bool = False
+    pnl_accounted_usd: float = 0.0
 
 
 @dataclass
