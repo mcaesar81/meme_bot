@@ -257,10 +257,14 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                 continue
 
             filtered = risk.filter_candidates(candidates)
+            filtered_ranked = sorted(filtered, key=lambda c: c.momentum_score, reverse=True)
+            fallback_top_n = max(1, int(cfg.get("strategy", "entry_fallback_top_n", default=5)))
+            entry_candidates = filtered_ranked[:fallback_top_n]
             probe = strategy.pick_entry(candidates)
             probe_reason = "no_candidates" if probe is None else risk.evaluate_candidate(probe)[1]
-            best = strategy.pick_entry(filtered)
+            best = filtered_ranked[0] if filtered_ranked else None
             best_reason = "ok"
+            selected_rank: int | None = None
 
             if best:
                 if last_top_token == best.address:
@@ -279,75 +283,90 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                     if reason == "time_parse_warn":
                         logger.event("time_parse_warn", {"field": "last_trade_ts_iso", "value": state.last_trade_ts_iso})
                     best_reason = reason if reason != "time_parse_warn" else "ok"
-                elif not filtered:
+                elif not filtered_ranked:
                     best_reason = probe_reason
-                elif not best:
-                    best_reason = "signal_false"
                 else:
                     cooldown_min = int(cfg.get("risk", "same_token_cooldown_min", default=10))
-                    last_trade_for_token = token_last_trade_iso.get(best.address)
-                    if last_trade_for_token:
-                        last_trade_dt = parse_iso_datetime(last_trade_for_token)
-                        if last_trade_dt and now - last_trade_dt < timedelta(minutes=cooldown_min):
-                            best_reason = "same_token_cooldown"
-                    cooldown_until = token_cooldowns.get(best.address)
-                    if cooldown_until and now < cooldown_until:
-                        best_reason = "token_cooldown"
-                        logger.event(
-                            "token_cooldown_blocked",
-                            {
-                                "token_address": best.address,
-                                "token_symbol": best.symbol,
-                                "token_name": best.name,
-                                "cooldown_until": cooldown_until.isoformat(),
-                            },
-                        )
+                    for rank, candidate in enumerate(entry_candidates, start=1):
+                        candidate_reason = "ok"
+                        last_trade_for_token = token_last_trade_iso.get(candidate.address)
+                        if last_trade_for_token:
+                            last_trade_dt = parse_iso_datetime(last_trade_for_token)
+                            if last_trade_dt and now - last_trade_dt < timedelta(minutes=cooldown_min):
+                                candidate_reason = "same_token_cooldown"
 
-                if best_reason == "ok" and best:
-                    size = strategy.initial_entry_size()
-                    entry_fee_break_even_pct = fee_bps * 2 / 100
-                    volatility_pct = abs(best.price_change_m5)
-                    if volatility_pct < min_entry_vol_m5:
-                        best_reason = "entry_volatility_too_low"
-                    elif min_entry_vol_fee_mult > 0 and volatility_pct < entry_fee_break_even_pct * min_entry_vol_fee_mult:
-                        best_reason = "entry_move_too_small_for_fees"
-                    if best_reason == "ok":
-                        reference_price = _safe_quote(quote, best.address, "buy", size)
-                        if reference_price <= 0:
-                            best_reason = "price_unavailable"
-                        else:
-                            slippage_limit = risk.slippage_limit_bps(best.liquidity_usd)
-                            if not risk.slippage_ok(reference_price, best.price_usd, slippage_limit):
-                                best_reason = "slippage_too_high"
+                        cooldown_until = token_cooldowns.get(candidate.address)
+                        if candidate_reason == "ok" and cooldown_until and now < cooldown_until:
+                            candidate_reason = "token_cooldown"
+                            logger.event(
+                                "token_cooldown_blocked",
+                                {
+                                    "token_address": candidate.address,
+                                    "token_symbol": candidate.symbol,
+                                    "token_name": candidate.name,
+                                    "cooldown_until": cooldown_until.isoformat(),
+                                    "rank": rank,
+                                },
+                            )
+
+                        if candidate_reason == "ok":
+                            size = strategy.initial_entry_size()
+                            entry_fee_break_even_pct = fee_bps * 2 / 100
+                            volatility_pct = abs(candidate.price_change_m5)
+                            if volatility_pct < min_entry_vol_m5:
+                                candidate_reason = "entry_volatility_too_low"
+                            elif min_entry_vol_fee_mult > 0 and volatility_pct < entry_fee_break_even_pct * min_entry_vol_fee_mult:
+                                candidate_reason = "entry_move_too_small_for_fees"
+
+                        if candidate_reason == "ok":
+                            reference_price = _safe_quote(quote, candidate.address, "buy", size)
+                            if reference_price <= 0:
+                                candidate_reason = "price_unavailable"
                             else:
-                                result = executor.execute(best.symbol, best.address, "buy", size, reference_price)
-                                _record_trade_attempt(state, token_last_trade_iso, best.address, now)
-                                entry_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
-                                result.metadata.update(_token_meta(best))
-                                result.metadata["reference_price_usd"] = best.price_usd
-                                result.metadata["fees_est_usd"] = entry_fee
-                                state.active_position = asdict(
-                                    Position(
-                                        symbol=best.symbol,
-                                        token_name=best.name,
-                                        token_address=best.address,
-                                        pair_address=best.pair_address,
-                                        dex_id=best.dex_id,
-                                        chain_id=best.chain_id,
-                                        size_usd=result.filled_usd,
-                                        entry_price_usd=result.avg_price_usd,
-                                        opened_at=now,
-                                        last_scale_in_at=now,
-                                        last_fill_price_usd=result.avg_price_usd,
-                                        fees_paid_usd=entry_fee,
-                                        last_high_price_usd=result.avg_price_usd,
-                                        last_high_after_partial_usd=result.avg_price_usd,
-                                        range_high_price_usd=result.avg_price_usd,
-                                        range_low_price_usd=result.avg_price_usd,
-                                        range_window_start=now,
-                                    )
-                                )
-                                logger.trade(result)
+                                slippage_limit = risk.slippage_limit_bps(candidate.liquidity_usd)
+                                if not risk.slippage_ok(reference_price, candidate.price_usd, slippage_limit):
+                                    candidate_reason = "slippage_too_high"
+
+                        if candidate_reason != "ok":
+                            best_reason = candidate_reason
+                            continue
+
+                        result = executor.execute(candidate.symbol, candidate.address, "buy", size, reference_price)
+                        _record_trade_attempt(state, token_last_trade_iso, candidate.address, now)
+                        entry_fee = _estimate_fee_usd(result.filled_usd, fee_bps)
+                        result.metadata.update(_token_meta(candidate))
+                        result.metadata["reference_price_usd"] = candidate.price_usd
+                        result.metadata["fees_est_usd"] = entry_fee
+                        result.metadata["entry_rank"] = rank
+                        state.active_position = asdict(
+                            Position(
+                                symbol=candidate.symbol,
+                                token_name=candidate.name,
+                                token_address=candidate.address,
+                                pair_address=candidate.pair_address,
+                                dex_id=candidate.dex_id,
+                                chain_id=candidate.chain_id,
+                                size_usd=result.filled_usd,
+                                entry_price_usd=result.avg_price_usd,
+                                opened_at=now,
+                                last_scale_in_at=now,
+                                last_fill_price_usd=result.avg_price_usd,
+                                fees_paid_usd=entry_fee,
+                                last_high_price_usd=result.avg_price_usd,
+                                last_high_after_partial_usd=result.avg_price_usd,
+                                range_high_price_usd=result.avg_price_usd,
+                                range_low_price_usd=result.avg_price_usd,
+                                range_window_start=now,
+                            )
+                        )
+                        logger.trade(result)
+                        best = candidate
+                        best_reason = "ok"
+                        selected_rank = rank
+                        break
+
+                if selected_rank is None and entry_candidates and best_reason == "ok":
+                    best_reason = "all_top_candidates_blocked"
 
                 if best_reason != "ok":
                     payload = {
@@ -359,6 +378,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                         "effective_price": quote.get_effective_price(best.address, "buy", 1.0) if best else None,
                         "candidates": len(candidates),
                         "passed_filters": len(filtered),
+                        "entry_selected_rank": selected_rank,
+                        "entry_fallback_window": min(fallback_top_n, len(filtered_ranked)),
                     }
                     if best:
                         payload.update(_token_meta(best))
@@ -371,6 +392,8 @@ def run_loop(stop_event: Event, cfg_path: str = "config.yaml") -> None:
                         "passed_filters": len(filtered),
                         "best": best.address if best else None,
                         "blocked_by": None if best_reason == "ok" else best_reason,
+                        "entry_selected_rank": selected_rank,
+                        "entry_fallback_window": min(fallback_top_n, len(filtered_ranked)),
                     },
                 )
             else:
