@@ -21,6 +21,7 @@ Config-first Python skeleton for a crypto meme-coin trading bot (Windows + Raspb
 - Strategy: momentum scalp
   - test entry (`$2`), optional scale-in up to `$5`.
   - exits: stop loss (`-$1`), stall (`75s`), max hold (`8m`), quick profit (`+$0.50` partial + tighter stall).
+  - entry fallback: if rank-1 passed token is blocked (e.g. cooldown), bot can try next passed candidates up to `strategy.entry_fallback_top_n` (default `5`).
 - Shared file locking for config/state/log paths to reduce cross-process corruption.
 
 ## New UI architecture
